@@ -14,9 +14,9 @@ EventBridge bus. Two rules on that bus work independently of each other and of t
 consumes to record the fulfilment in its own table, the other publishes a short notification to an SNS topic. Dead-letter queues, CloudWatch
 alarms and a dashboard make the failure paths visible.
 
-**State:** the fulfilment, notification, dashboard and alarm paths are deployed and verified end to end in `dev`. The asynchronous intake
-(API Gateway and the intake queue in front of `CreateOrder`) is new and was tested offline; it is deployed by the pipeline on merge and
-has not been verified live yet. `prod` is defined from the same modules and has not been applied.
+**State:** deployed and verified end to end in `dev`: a signed order is accepted with `202`, saved by `CreateOrder`, fulfilled, announced by email
+and charted, and the failure paths (dead-letter queue and alarm) were triggered on purpose. `prod` is defined from the same modules and has not
+been applied.
 
 ## Architecture
 
