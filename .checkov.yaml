@@ -1,0 +1,11 @@
+# Checkov configuration. Findings listed under skip-check were reviewed and are intentional;
+# each has a reason. Anything new fails the pull request check.
+directory:
+  - terraform
+framework:
+  - terraform
+quiet: true
+compact: true
+skip-path:
+  - terraform/bootstrap/.terraform
+  - .terraform
