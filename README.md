@@ -10,7 +10,7 @@ A serverless, event-driven orders application on AWS, defined as infrastructure 
 | Rule → SQS → `FulfilOrder` → `Fulfilments` table | Deployed and verified in `dev` |
 | Rule → SNS order notification email | Deployed and verified in `dev` |
 | CloudWatch dashboard `orders-<env>` | Deployed in `dev` |
-| Dead-letter queue alarm | Deployed in `dev`; failure path not yet tested |
+| Dead-letter queue alarm | Deployed in `dev` and tested: a bad message reached the dead-letter queue after 4 receives and the alarm went to `ALARM` about 11 minutes after it was sent |
 | `prod` environment | Defined, not applied |
 | Remote state in S3 (versioned, encrypted, native locking) | `dev` migrated and verified (`plan` shows no changes); `prod` will use it from its first init |
 | GitHub Actions: `validate.yml` and `deploy.yml` (OIDC) | Written and syntax-checked; not yet run (no GitHub repository yet, `terraform/bootstrap` not applied, secrets not set) |

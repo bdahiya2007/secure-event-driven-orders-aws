@@ -53,7 +53,7 @@ The rule has an **input transformer** that sends `Order <orderId> was created at
 It reads the queue in batches of up to 10, re-validates every message, and writes one record per order to `Fulfilments-<env>` with `status` `FULFILLED`, `itemCount`, `totalQuantity`, `eventId`, `orderCreatedAt` and `fulfilledAt`. That is all it does today: there is no inventory or shipping logic yet.
 
 ### What happens when processing fails?
-Only the failed messages in a batch go back to the queue (`ReportBatchItemFailures`). After **3 failed receives** a message moves to `order-fulfilment-<env>-dlq`, where it is kept for 14 days. A CloudWatch alarm fires when the dead-letter queue is not empty. The failure path itself has **not been tested** yet; the test is in [terraform/README.md](../terraform/README.md#asynchronous-fulfilment).
+Only the failed messages in a batch go back to the queue (`ReportBatchItemFailures`). After **3 failed receives** a message moves to `order-fulfilment-<env>-dlq`, where it is kept for 14 days. A CloudWatch alarm fires when the dead-letter queue is not empty. The failure path was tested in `dev`: a message that cannot be parsed was retried, moved to the dead-letter queue on the fourth receive attempt (SQS moves a message when a receive would exceed `maxReceiveCount`, so 3 allowed receives, 180 seconds apart, then the move), and the alarm went to `ALARM` about 11 minutes after the message was sent. The test is in [terraform/README.md](../terraform/README.md#asynchronous-fulfilment).
 
 ### How can I get messages out of the dead-letter queue?
 Read them with the CLI, fix the cause, then redrive them to the source queue (SQS offers a redrive task in the console and CLI). Redrive has **not been tried** in this project.
