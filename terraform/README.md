@@ -90,7 +90,7 @@ Two workflows live in `.github/workflows/` (they take effect once this folder is
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `validate.yml` | Pull requests to `main` | Offline checks only: `terraform fmt -check`, `init -backend=false` plus `validate` for `dev` and `prod`, a compile check of both Lambda handlers, and the secret scan ([docs/SECRET_SCANNING.md](../docs/SECRET_SCANNING.md)). No AWS credentials are used, so a pull request can never touch AWS. |
+| `validate.yml` | Pull requests to `main` | Offline checks only: `terraform fmt -check`, `init -backend=false` plus `validate` for `dev` and `prod`, a compile check of both Lambda handlers, the Lambda unit tests (`tests/`, standard library only), a `bandit` scan of the Lambda code, a `checkov` scan of the Terraform (reviewed exceptions, each with a reason, are in `.checkov.yaml`) and the secret scan ([docs/SECRET_SCANNING.md](../docs/SECRET_SCANNING.md)). No AWS credentials are used, so a pull request can never touch AWS. |
 | `deploy.yml` | Push to `main` (documentation-only changes are skipped), or run manually | Format and compile checks, `init`, `validate`, `plan`, a **no-delete guard**, then `apply` of exactly that saved plan. |
 
 **Lambda packaging:** Terraform does it. The `archive_file` data sources zip each function's `src/handler.py` during the plan, and the apply updates a function whenever its code hash changes. There is no separate `update-function-code` step.

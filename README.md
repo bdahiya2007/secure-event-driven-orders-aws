@@ -14,7 +14,8 @@ A serverless, event-driven orders application on AWS, defined as infrastructure 
 | `prod` environment | Defined, not applied |
 | Remote state in S3 (versioned, encrypted, native locking) | `dev` migrated and verified (`plan` shows no changes); `prod` will use it from its first init |
 | GitHub Actions: `validate.yml` and `deploy.yml` (OIDC) | Written and syntax-checked; not yet run (no GitHub repository yet, `terraform/bootstrap` not applied, secrets not set) |
-| API Gateway, KMS customer-managed keys, CI scanning | Planned |
+| Lambda unit tests (25), `bandit` and `checkov` in `validate.yml` | Running on every pull request; all green |
+| API Gateway, KMS customer-managed keys | Planned |
 
 ## What it does
 
@@ -135,6 +136,8 @@ sequenceDiagram
 ├── .gitignore                 # state, secrets, build output
 ├── README.md
 ├── TODO.md                    # open work, grouped by area (local only, git-ignored)
+├── .checkov.yaml              # reviewed checkov exceptions, each with a reason
+├── tests/                     # Lambda unit tests (standard library only)
 ├── .githooks/pre-commit       # runs the secret scan before every commit
 ├── scripts/                   # secret-scan.py, install-hooks.sh
 ├── docs/
@@ -203,12 +206,12 @@ Known gaps:
 - The SNS topics are not KMS-encrypted, because EventBridge and CloudWatch cannot use the AWS-managed `aws/sns` key
 - Tables use the AWS-managed DynamoDB key rather than a customer-managed key
 - State is kept in a bucket shared with another project in the same account; there is no separate state account or cross-account access control
-- There is no static scanning (tfsec / Checkov) yet; the bootstrap that creates the deploy role is applied by hand with local state
+- Checkov exceptions are accepted on purpose (see `.checkov.yaml`: unencrypted SNS topics, no VPC or code signing); the bootstrap that creates the deploy role is applied by hand with local state
 
 ## Roadmap
 
 - API Gateway in front of `CreateOrder`
 - Real fulfilment logic (inventory, shipping) in `FulfilOrder`
 - Customer-managed KMS key for the tables and SNS topics
-- CI security scans (`tfsec` / Checkov, `bandit`, `pip-audit`) and Lambda unit tests in `validate.yml`
+- `pip-audit` once the Lambdas have pinned third-party dependencies (today they use only the runtime's `boto3`)
 - Test the dead-letter queue alarm and apply `prod`
