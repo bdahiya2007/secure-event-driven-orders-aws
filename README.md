@@ -135,6 +135,20 @@ sequenceDiagram
 - **Operability:** a dashboard of the three metrics that show the flow, an alarm on the dead-letter queue (tested for real), structured logs that record message IDs and never order contents.
 - **Cost awareness:** idle cost is about $0 (see [Cost](#cost-awareness)).
 
+## Observability
+
+The `orders-<env>` CloudWatch dashboard charts the three metrics that show the flow: EventBridge `MatchedEvents` per rule, SQS
+`NumberOfMessagesSent` for the queue and its dead-letter queue, and SNS `NumberOfMessagesPublished` per topic. The charts below are
+from `dev` during testing: two orders at about 05:30, a few more around 07:00, then a deliberately bad message sent at 07:07 that reached the
+dead-letter queue and fired the alarm. The second alerts-topic bump, at about 07:20, is the alarm returning to `OK`.
+
+![EventBridge MatchedEvents per rule](docs/images/matched-events.png)
+![SQS NumberOfMessagesSent for the queue and the dead-letter queue](docs/images/sqs-messages-sent.png)
+![SNS NumberOfMessagesPublished per topic, with the alarm notifications on the alerts topic](docs/images/sns-messages-published.png)
+
+The dead-letter queue line stays at zero because SQS does not count the move to a dead-letter queue as a send; the alarm on the queue's depth is
+what reports it.
+
 ## Security design
 
 | Area | What is in place |
