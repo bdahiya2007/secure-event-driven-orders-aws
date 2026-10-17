@@ -52,7 +52,7 @@ So the caller has it in the `202` response without waiting, and so every retry o
 It needs no extra service and keeps the endpoint closed to anyone without credentials, which suits service-to-service callers. An API key is not authentication. A Cognito or JWT authorizer would suit end users and is listed as an open gap (T1).
 
 ### What does the API reject before anything is queued?
-An unsigned request (`403`), a body that does not match the schema (`400`: only `customerId`, `items`, `itemId` and `quantity`, with length and range limits, nothing else), a content type other than JSON (`415`), and requests over the throttle (`429`). The `400` and `500` messages are fixed and never echo what the caller sent.
+An unsigned request (`403`), a body that does not match the schema (`400`: only `customerId`, `items`, `itemId` and `quantity`, with length and range limits, nothing else), a content type other than JSON (`415`), and requests over the throttle (`429`). The `400` and `500` messages are fixed and never echo what the caller sent. All four were checked live on 2026-10-17, along with the happy path: a signed order returned `202`, was saved, fulfilled and announced within seconds, and the dead-letter queue and alarms stayed clean.
 
 ### Why can I not send a test message to the intake queue myself?
 The queue policy denies `sqs:SendMessage` to everyone except the API's role, administrators included, for the same reason as the bus policy: the queue is a trust boundary. To test, call the API. `CreateOrder` also re-validates every message, so a forged one could not store extra data.
