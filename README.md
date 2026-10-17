@@ -185,17 +185,20 @@ Residual risks from the [threat model](docs/THREAT_MODEL.md), highest first. Eac
 | Threat | Risk | Gap | Planned fix |
 |---|---|---|---|
 | **T1** | Medium | The API accepts AWS-signed requests only; there is no end-user identity, so it is not safe to expose to browsers or customers | A Cognito or JWT authorizer |
-| **T11** | Low | The stage is throttled and the consumer capped, but there is no per-caller quota, reserved concurrency or budget alarm | A usage plan, a reserved concurrency limit, an AWS Budget alert |
-| **T14** | Low | A message that fails three times leaves the order saved but unannounced, in the intake dead-letter queue, until redriven | Redrive tooling (untried) |
+| **T7** | Medium | The caller's identity is not stored with an order, API access logging is off (it needs an account-wide API Gateway logging role), and CloudTrail coverage is unverified | Record the caller, add API access logs, confirm CloudTrail |
 | **T16** | Medium | The `dev` and `prod` environments are not tied to a branch and have no approval gate, because a private repository on the free GitHub plan cannot use either | Make the repository public or upgrade, then restrict to protected branches and require approval for `prod` |
 | **T22** | Medium | The full plan and apply output in the Actions log prints ARNs and the account ID | Hide the plan output and mask the account ID before the repository is made public |
-| **T7** | Medium | The caller's identity is not stored with an order, API access logging is off (it needs an account-wide API Gateway logging role), and CloudTrail coverage is unverified | Record the caller, add API access logs, confirm CloudTrail |
+| T25 | Low | The deploy role can manage REST APIs in the account, not only this project's, because API IDs are not known in advance | Tag-based access control |
+| T11 | Low | The stage is throttled and the consumer capped, but there is no per-caller quota, reserved concurrency or budget alarm | A usage plan, a reserved concurrency limit, an AWS Budget alert |
+| T14 | Low | A message that fails three times leaves the order saved but unannounced, in the intake dead-letter queue, until redriven | Redrive tooling (untried) |
 | T8, T9 | Low | SNS topics are unencrypted; tables use the AWS-managed key | A customer-managed KMS key |
 | T15 | Low | No idempotency key on create, and a repeat could send two notification emails | Accept and store a client-supplied key |
 | T18 | Low | `dev` has no deletion protection, and the pipeline's no-delete guard can be overridden by hand | Keep the override manual and logged |
 | T19 | Low | The transitive packages of `bandit` and `checkov` are not pinned (they run with no AWS credentials) | A hashed requirements file for the scan tools |
-| T25 | Low | The deploy role can manage REST APIs in the account, not only this project's, because API IDs are not known in advance | Tag-based access control |
 | T21 | Low | The Terraform state holds the subscription emails in plain text and sits in a bucket shared with another project | A dedicated state bucket, or exclude the addresses from state |
+
+**Not yet tested live:** a burst that trips the stage throttle (`429`), redriving a message from a dead-letter queue back to its source queue,
+the retry path after a forced publish failure, and the whole stack in `prod`.
 
 ## Cost awareness
 
@@ -323,7 +326,7 @@ More questions and answers are in the [FAQ](docs/FAQ.md).
 | **Repository protection** | No branch protection or `prod` approval gate: the repository is private on the free GitHub plan, which does not offer them | Make the repository public (after hiding the plan from the Actions log and masking the account ID) or upgrade |
 | **No `pip-audit` yet** | Nothing to audit until the Lambdas have a pinned requirements file | Add it with the first third-party dependency |
 
-**Built but not applied:** the `prod` environment. **Tried and working:** retries and the dead-letter queue alarm. **Not tried:** redriving messages from the dead-letter queue back to the main queue.
+**Built but not applied:** the `prod` environment. **Tried and working in `dev`:** the signed order API, retries and both dead-letter alarms, and the forged-event controls. **Not tried:** redriving from a dead-letter queue and a throttle burst.
 
 ## Related
 
