@@ -170,6 +170,24 @@ The full analysis, with each threat, its control and what is still open, is in t
 | **Static analysis** | `bandit` on the Lambda code and `checkov` on the Terraform for every pull request. Each accepted `checkov` exception is listed with its reason in `.checkov.yaml`. GitHub Actions are pinned by commit SHA. |
 | **Log hygiene** | Errors return generic messages, and logs record the error and message ID, never order contents. |
 
+### Open security gaps
+
+Residual risks from the [threat model](docs/THREAT_MODEL.md), highest first. Each ID matches a row in that file.
+
+| Threat | Risk | Gap | Planned fix |
+|---|---|---|---|
+| **T1** | Medium, High once exposed | `CreateOrder` has no authentication layer; it is protected only by IAM permission to invoke it | API Gateway with an authorizer and request validation |
+| **T11** | Medium | No throttling, reserved concurrency or budget alarm, so a flood of requests means cost and exhausted concurrency | Throttling at the API, a concurrency limit, an AWS Budget alert |
+| **T14** | Medium | An order that is saved but whose event fails to publish is never fulfilled or announced; nothing retries the publish | DynamoDB Streams with EventBridge Pipes |
+| **T16** | Medium | The `dev` and `prod` environments are not tied to a branch and have no approval gate, because a private repository on the free GitHub plan cannot use either | Make the repository public or upgrade, then restrict to protected branches and require approval for `prod` |
+| **T22** | Medium | The full plan and apply output in the Actions log prints ARNs and the account ID | Hide the plan output and mask the account ID before the repository is made public |
+| **T7** | Medium | The caller's identity is not stored with an order, and CloudTrail coverage of these services is not verified | Record the caller from the API, and confirm or add a CloudTrail trail |
+| T8, T9 | Low | SNS topics are unencrypted; tables use the AWS-managed key | A customer-managed KMS key |
+| T15 | Low | No idempotency key on create, and a repeat could send two notification emails | Accept and store a client-supplied key |
+| T18 | Low | `dev` has no deletion protection, and the pipeline's no-delete guard can be overridden by hand | Keep the override manual and logged |
+| T19 | Low | The transitive packages of `bandit` and `checkov` are not pinned (they run with no AWS credentials) | A hashed requirements file for the scan tools |
+| T21 | Low | The Terraform state holds the subscription emails in plain text and sits in a bucket shared with another project | A dedicated state bucket, or exclude the addresses from state |
+
 ## Cost awareness
 
 Built and run in a personal AWS account, so cost is a design constraint. Idle cost is effectively zero, because everything is
