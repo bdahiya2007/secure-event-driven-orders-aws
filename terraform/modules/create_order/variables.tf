@@ -23,6 +23,29 @@ variable "table_arn" {
   type        = string
 }
 
+variable "queue_arn" {
+  description = "SQS queue the function consumes orders from"
+  type        = string
+}
+
+variable "timeout" {
+  description = "Function timeout in seconds; the queue visibility timeout must be at least 6x this"
+  type        = number
+  default     = 30
+}
+
+variable "batch_size" {
+  description = "Maximum messages per invocation"
+  type        = number
+  default     = 10
+}
+
+variable "max_concurrency" {
+  description = "Maximum concurrent invocations from the queue (2-1000)"
+  type        = number
+  default     = 5
+}
+
 variable "log_retention_days" {
   description = "CloudWatch log retention in days"
   type        = number

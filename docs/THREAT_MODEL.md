@@ -4,7 +4,7 @@ A STRIDE threat model of the orders stack and the pipeline that deploys it. It l
 threats apply, which control covers each one, and what is still open. Ratings are the author's judgement for this project at its current
 size, not a formal score. Controls named here exist in the code; gaps are listed rather than hidden.
 
-**Scope:** the `dev` and `prod` environments as defined in `terraform/`, the GitHub Actions pipeline, and the Terraform state. **Out of scope:** the
+**Scope:** the `dev` and `prod` environments as defined in `terraform/` (the order API, both queues, the Lambdas, the bus and the topics), the GitHub Actions pipeline, and the Terraform state. **Out of scope:** the
 security of AWS and GitHub themselves, takeover of the owner's AWS or GitHub account, physical access, and the email provider.
 
 ## Assets
@@ -22,7 +22,7 @@ security of AWS and GitHub themselves, takeover of the owner's AWS or GitHub acc
 
 | Actor | Trust |
 |---|---|
-| Order client | Untrusted. Today it must hold IAM permission to invoke the Lambda; once an API is added it is an anonymous or authenticated internet caller |
+| Order client | Untrusted. It reaches the internet-facing API, but only a request signed by a principal allowed `execute-api:Invoke` gets past authorisation, so in practice it is another service or an operator, not an end user |
 | Other principals in the AWS account | Partly trusted. They can be granted `events:PutEvents` or `sqs:SendMessage`, and the owner's permission set can do both |
 | Repository owner | Trusted, and the only person with write access |
 | GitHub Actions runner | Trusted only while running reviewed workflow code, and only for jobs in the `dev` or `prod` environment |
@@ -34,14 +34,16 @@ security of AWS and GitHub themselves, takeover of the owner's AWS or GitHub acc
 flowchart LR
     client([Order client])
     subgraph tb1 [Trust boundary: AWS account, application]
+        apigw["API Gateway<br/>IAM auth, schema, throttling"]
+        iq[["Intake queue + dead-letter queue"]]
         fn["CreateOrder Lambda"]
         ddb[("Orders table")]
         bus{{"EventBridge bus"}}
-        q[["SQS queue + dead-letter queue"]]
+        q[["Fulfilment queue + dead-letter queue"]]
         ful["FulfilOrder Lambda"]
         fddb[("Fulfilments table")]
         sns{{"SNS topics"}}
-        cw["CloudWatch: logs, alarm, dashboard"]
+        cw["CloudWatch: logs, alarms, dashboard"]
     end
     email(["Email recipient"])
     subgraph tb2 [Trust boundary: delivery pipeline]
@@ -51,11 +53,15 @@ flowchart LR
         state[("Terraform state in S3")]
     end
 
-    client -- "1. invoke (IAM)" --> fn
+    client -- "1. signed POST (internet)" --> apigw
+    apigw -- "2. SendMessage" --> iq
+    iq --> fn
     fn --> ddb
-    fn -- "2. PutEvents" --> bus
+    fn -- "3. PutEvents" --> bus
     bus --> q --> ful --> fddb
+    ful -. "reads to verify" .-> ddb
     bus --> sns --> email
+    iq -. "failed messages" .-> cw
     q -. "failed messages" .-> cw
     fn --> cw
     ful --> cw
@@ -73,21 +79,23 @@ Rating is the residual risk after the listed controls: **Low**, **Medium** or **
 
 | ID | STRIDE | Threat | Existing controls | Residual | Open item |
 |---|---|---|---|---|---|
-| T1 | Spoofing | A caller who should not create orders does so | `CreateOrder` has no public endpoint; invoking it needs IAM permission | Medium | No authentication layer exists. Exposing it through an API makes this High unless an authorizer is added first |
+| T1 | Spoofing | A caller who should not create orders does so | `AWS_IAM` authorisation: a request must be signed by a principal allowed `execute-api:Invoke`, otherwise `403`. Requests are schema-validated and throttled at the stage | Medium | There is no end-user identity (no Cognito or other authorizer), so the API is not safe to hand to browsers or customers. Any principal in the account granted `execute-api:Invoke` can place orders |
 | T2 | Tampering | Hostile or unexpected fields in an order body | Allow-list of `customerId`, `itemId`, `quantity` with type and length limits; unknown fields dropped; 256 KB body limit | Low | None |
 | T3 | Tampering | A client sets its own `orderId` or `createdAt` | Both are generated server-side and cannot be overridden | Low | None |
 | T4 | Tampering | An order line overwrites another | Single transaction with `attribute_not_exists(orderId)`; a duplicate rejects the whole order | Low | None |
 | T5 | Spoofing | A forged `OrderCreated` event is put on the bus by another principal in the account | The bus policy denies `events:PutEvents` to every principal except the `CreateOrder` role, administrators included. `FulfilOrder` also checks each event against the stored order (same customer, same lines, same quantities) before recording anything. Verified live on 2026-10-17: a hand-made `PutEvents` from an administrator identity was refused with `AccessDeniedException`, and a normal order was still fulfilled | Low | An attacker would need to take over the `CreateOrder` role, or change the bus policy and write matching rows into `Orders`. Both are outside what a plain `PutEvents` permission allows |
 | T6 | Tampering | A message is sent straight to the queue | Messages are re-validated, then checked against the stored order; invalid, forged or altered ones fail, are retried and dead-lettered, and the alarm fires. Tested live on 2026-10-17: unparseable input, and a well-formed event for an order that does not exist, were both rejected with no fulfilment record, were dead-lettered after four receives, and fired the alarm about 11 minutes after they were sent | Low | A principal with `sqs:SendMessage` can still add noise to the queue; it costs retries and a dead-letter alarm, not a false fulfilment |
-| T7 | Repudiation | Nobody can say who created an order | Order and message IDs are logged | Medium | No caller identity is stored. Whether CloudTrail covers these services is not verified by this project |
+| T7 | Repudiation | Nobody can say who created an order | Order and message IDs are logged; the API request ID is the `orderId`, so one request maps to one order | Medium | No caller identity is stored. API access logging is off, because it needs an account-wide API Gateway CloudWatch role shared with other projects. Whether CloudTrail covers these services is not verified |
 | T8 | Information disclosure | Order data leaks through notifications | The notification carries only `orderId` and a timestamp | Low | The SNS topics are not KMS-encrypted |
 | T9 | Information disclosure | Order data at rest or in transit | DynamoDB encryption at rest (AWS-managed key), SQS-managed encryption, TLS-only policies on queues and topics | Low | No customer-managed key; no field-level protection of `customerId` |
 | T10 | Information disclosure | Order contents leak through logs | Logs record message IDs and error types, never bodies; error responses are generic | Low | None |
-| T11 | Denial of service | A flood of create requests exhausts concurrency or raises cost | On-demand billing, bounded retries and short client timeouts | Medium | No throttling, no reserved concurrency, no budget alarm. Matters once an API exists |
+| T11 | Denial of service | A flood of create requests exhausts concurrency or raises cost | Stage throttling (10 requests per second, burst 20), request validation before anything is queued, a queue that absorbs bursts, consumer concurrency capped at 5, on-demand billing, bounded retries and short client timeouts | Low | No per-caller quota, no reserved concurrency, no budget alarm |
 | T12 | Denial of service | Poison messages block fulfilment | Partial-batch failure reporting, 3 receives then dead-letter, 14-day dead-letter retention, concurrency capped at 5 | Low | The main queue keeps the 4-day default retention |
 | T13 | Denial of service | Failed orders pile up unnoticed | Alarm on dead-letter queue depth to an alerts topic. Tested | Low | Redrive from the dead-letter queue is untried |
-| T14 | Integrity | An order is saved but its event is not published | The caller gets a `500` carrying the `orderId`; nothing is published before the save | Medium | Nothing retries the publish, so that order is never fulfilled or announced. Fix: DynamoDB Streams with EventBridge Pipes |
+| T14 | Integrity | An order is saved but its event is not published | The message stays on the queue until both steps succeed. A retry finds the order saved, confirms it matches the message, and publishes again | Low | After three failed attempts the message goes to the intake dead-letter queue and the alarm fires, leaving the order saved but unannounced until it is redriven (untried) |
 | T15 | Integrity | Duplicate processing | Fulfilment is idempotent (conditional write) | Low | A client retry creates a second order (no idempotency key); a repeat could send two emails |
+| T24 | Tampering | A forged or altered message is sent straight to the intake queue | The queue policy denies `SendMessage` to everyone except the API's role, administrators included. `CreateOrder` re-validates every field, drops unknown ones, and rejects a message that reuses a stored `orderId` with different content | Low | A caller who could assume the API's role could queue any order |
+| T26 | Information disclosure | The API's error responses reveal internals or echo input | Validation failures return a fixed `400` message, queue errors a fixed `500`; no response includes the request body | Low | None |
 
 ### Pipeline and infrastructure
 
@@ -101,15 +109,17 @@ Rating is the residual risk after the listed controls: **Low**, **Medium** or **
 | T21 | Information disclosure | Terraform state leaks | Private, versioned, encrypted bucket, TLS-only, native locking; the deploy role can reach only this project's key prefix | Low | State holds the subscription emails in plain text (marked sensitive only in plan output) and sits in a bucket shared with another project |
 | T22 | Information disclosure | Account details appear in public CI logs | Plan summary lists only action and address | Medium | The full plan and apply output print ARNs and the account ID. Acceptable while private; must be masked before the repository is made public |
 | T23 | Repudiation | Who deployed what | Every change is a pull request or push with a workflow run log; the role session is traceable in CloudTrail | Low | No branch protection to force pull requests |
+| T25 | Elevation of privilege | A compromised deploy role changes an API other than this project's | The role is limited to one region and to the REST API actions the Terraform needs; it cannot create or change IAM roles outside this project's two prefixes | Low | REST API IDs are generated, so the permission cannot be scoped to this project's API by name; the role can edit any REST API in the account. Narrowing it with tags is a follow-up |
 
 ## Residual risk summary
 
-Closed since the first version of this model: T5 and T6 (forged events), by the bus policy and the order check.
+Closed or reduced since the first version of this model: T5 and T6 (forged events, by the bus policy and the order check), T14 (a failed publish is now retried), T11 (throttling and validation at the edge) and, partly, T1 (the API requires signed requests).
 
-1. **T1, T11: no protection at the edge.** Acceptable while there is no public endpoint. They become the first work item once an API Gateway is added: an authorizer, request validation and throttling.
-2. **T14: saved but not published.** Move event publication to DynamoDB Streams with EventBridge Pipes.
+1. **T1: no end-user authentication.** Fine for service-to-service callers; add an authorizer before exposing the API to browsers or customers.
+2. **T7: no caller identity or API access logs.** Needs an account-wide API Gateway logging role and a decision on CloudTrail.
 3. **T16: environment not bound to a branch.** Needs a public repository or a paid GitHub plan to restrict deployments to `main` and require approval for `prod`.
 4. **T22: public CI logs.** Hide the full plan and mask the account ID before making the repository public.
+5. **T25: the deploy role can manage any REST API in the account.** Narrow it with tags.
 
 ## Keeping it current
 

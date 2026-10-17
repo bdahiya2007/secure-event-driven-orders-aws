@@ -1,6 +1,8 @@
 data "aws_caller_identity" "current" {}
 
 locals {
+  intake_queue_name = "order-intake-${var.environment}"
+
   # Created by terraform/bootstrap, which must be applied first. Every application role carries it,
   # so even a compromised deploy role cannot create a role more powerful than the boundary allows.
   permissions_boundary_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/orders-pipeline-app-role-boundary"
@@ -24,6 +26,28 @@ module "event_bus" {
   publisher_role_arns = [module.create_order.role_arn]
 }
 
+# Orders arrive here from API Gateway and are processed by CreateOrder.
+module "intake_queue" {
+  source = "../../modules/event_queue"
+
+  queue_name = local.intake_queue_name
+
+  # Only the API's role may send; the visibility timeout is 6x the CreateOrder timeout.
+  sender_role_arns           = [module.order_api.role_arn]
+  visibility_timeout_seconds = 180
+  alarm_actions              = [module.alerts.topic_arn]
+}
+
+module "order_api" {
+  source = "../../modules/order_api"
+
+  api_name                 = "order-intake-api-${var.environment}"
+  role_name                = "CreateOrder-api-${var.environment}-role"
+  queue_name               = local.intake_queue_name
+  queue_arn                = module.intake_queue.queue_arn
+  permissions_boundary_arn = local.permissions_boundary_arn
+}
+
 module "create_order" {
   source = "../../modules/create_order"
 
@@ -32,6 +56,7 @@ module "create_order" {
   event_bus_arn  = module.event_bus.bus_arn
   table_name     = module.orders_table.table_name
   table_arn      = module.orders_table.table_arn
+  queue_arn      = module.intake_queue.queue_arn
 
   permissions_boundary_arn = local.permissions_boundary_arn
 }
@@ -123,6 +148,6 @@ module "dashboard" {
   dashboard_name = "orders-${var.environment}"
   bus_name       = module.event_bus.bus_name
   rule_names     = [module.order_created_rule.rule_name, module.order_notification_rule.rule_name]
-  queue_names    = [module.fulfilment_queue.queue_name, module.fulfilment_queue.dlq_name]
+  queue_names    = [module.intake_queue.queue_name, module.intake_queue.dlq_name, module.fulfilment_queue.queue_name, module.fulfilment_queue.dlq_name]
   topic_names    = [module.order_notifications.topic_name, module.alerts.topic_name]
 }

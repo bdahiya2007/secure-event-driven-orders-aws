@@ -29,7 +29,7 @@ resource "aws_iam_role" "this" {
 }
 
 # Least privilege: write to its own log group, publish to the one event bus,
-# put items into the one orders table.
+# write and read the one orders table, consume the one intake queue.
 data "aws_iam_policy_document" "permissions" {
   statement {
     actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
@@ -44,6 +44,17 @@ data "aws_iam_policy_document" "permissions" {
   statement {
     actions   = ["dynamodb:PutItem"]
     resources = [var.table_arn]
+  }
+
+  # Read-only, to confirm a redelivered message really is the order already stored.
+  statement {
+    actions   = ["dynamodb:Query"]
+    resources = [var.table_arn]
+  }
+
+  statement {
+    actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
+    resources = [var.queue_arn]
   }
 }
 
@@ -60,7 +71,7 @@ resource "aws_lambda_function" "this" {
   handler          = "handler.lambda_handler"
   filename         = data.archive_file.this.output_path
   source_code_hash = data.archive_file.this.output_base64sha256
-  timeout          = 10
+  timeout          = var.timeout
   memory_size      = 128
 
   environment {
@@ -72,4 +83,18 @@ resource "aws_lambda_function" "this" {
 
   depends_on = [aws_cloudwatch_log_group.this, aws_iam_role_policy.this]
   tags       = var.tags
+}
+
+resource "aws_lambda_event_source_mapping" "sqs" {
+  event_source_arn = var.queue_arn
+  function_name    = aws_lambda_function.this.arn
+  batch_size       = var.batch_size
+
+  # Only failed messages in a batch return to the queue.
+  function_response_types = ["ReportBatchItemFailures"]
+
+  # Caps parallel invocations so a burst of orders cannot flood DynamoDB or the bus.
+  scaling_config {
+    maximum_concurrency = var.max_concurrency
+  }
 }

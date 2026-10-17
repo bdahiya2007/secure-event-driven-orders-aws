@@ -27,7 +27,7 @@
       ]
     },
     {
-      "Sid": "PassCreateOrderRolesToLambda",
+      "Sid": "PassCreateOrderRolesToLambdaAndApiGateway",
       "Effect": "Allow",
       "Action": "iam:PassRole",
       "Resource": [
@@ -36,7 +36,10 @@
       ],
       "Condition": {
         "StringEquals": {
-          "iam:PassedToService": "lambda.amazonaws.com"
+          "iam:PassedToService": [
+            "lambda.amazonaws.com",
+            "apigateway.amazonaws.com"
+          ]
         }
       }
     },
