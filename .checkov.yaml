@@ -1,5 +1,6 @@
-# Checkov configuration. Findings listed under skip-check were reviewed and are intentional;
-# each has a reason. Anything new fails the pull request check.
+# Checkov configuration. Findings listed under skip-check were reviewed and are intentional; each
+# has a reason. Anything new fails the pull request check. Revisit these when the matching item
+# in TODO.md (customer-managed KMS key, tracing, code signing) is picked up.
 directory:
   - terraform
 framework:
@@ -7,5 +8,30 @@ framework:
 quiet: true
 compact: true
 skip-path:
-  - terraform/bootstrap/.terraform
   - .terraform
+skip-check:
+  # SNS topics: EventBridge and CloudWatch alarms can only publish to an encrypted topic that uses a
+  # customer-managed KMS key, not the AWS-managed aws/sns key. The topics carry no order or customer data.
+  - CKV_AWS_26
+  # Log groups: retention is 14 days on purpose (configurable, low volume); KMS encryption of the
+  # logs waits for the customer-managed key planned in TODO.md. Logs record message IDs, never bodies.
+  - CKV_AWS_338
+  - CKV_AWS_158
+  # Lambda environment variables hold only resource names (table, bus), never secrets.
+  - CKV_AWS_173
+  # Code signing and tracing add a signing profile or X-Ray permissions in the boundary for no
+  # benefit at this size; not planned.
+  - CKV_AWS_272
+  - CKV_AWS_50
+  # The functions call only AWS service APIs; a VPC would need a NAT gateway or endpoints (cost)
+  # without a network-level benefit here.
+  - CKV_AWS_117
+  # CreateOrder is invoked synchronously (a dead-letter queue only applies to async invocations).
+  # FulfilOrder's failures are retried and dead-lettered by its SQS queue.
+  - CKV_AWS_116
+  # Reserved concurrency would consume the account's small default pool; FulfilOrder is already
+  # capped at 5 by the SQS trigger's maximum concurrency.
+  - CKV_AWS_115
+  # The deploy role's trust policy pins the repository by immutable owner and repository ID plus the
+  # environment, which is stricter than the repo-name pattern this rule recognises (false positive).
+  - CKV_AWS_358
