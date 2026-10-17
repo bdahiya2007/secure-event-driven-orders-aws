@@ -136,4 +136,8 @@ jobs:
 
       - name: Show non-sensitive outputs
         working-directory: ${{ env.WORKDIR }}
-        run: terraform output -no-color event_bus_name create_order_function_name fulfil_order_function_name
+        # terraform output takes one name at a time. Only plain names are printed, never ARNs or URLs.
+        run: |
+          for name in event_bus_name create_order_function_name fulfil_order_function_name; do
+            echo "$name = $(terraform output -raw "$name")"
+          done
