@@ -2,14 +2,14 @@
 
 Questions about the design, the behaviour and the operation of this project, grouped by topic, with short answers and where to read more. Everything described here was built and checked in `dev` (one account, one region, one user) unless an answer says otherwise; "not tested" means exactly that.
 
-**Topics:** [Design and flow](#design-and-flow) | [EventBridge](#eventbridge) | [SQS and fulfilment](#sqs-and-fulfilment) | [SNS and notifications](#sns-and-notifications) | [DynamoDB](#dynamodb) | [Lambda and Python](#lambda-and-python) | [Security and permissions](#security-and-permissions) | [Cost](#cost) | [Terraform and state](#terraform-and-state) | [CI/CD](#cicd) | [Operating and testing](#operating-and-testing)
+**Topics:** [Design and flow](#design-and-flow) | [The order API](#the-order-api) | [EventBridge](#eventbridge) | [SQS and fulfilment](#sqs-and-fulfilment) | [SNS and notifications](#sns-and-notifications) | [DynamoDB](#dynamodb) | [Lambda and Python](#lambda-and-python) | [Security and permissions](#security-and-permissions) | [Cost](#cost) | [Terraform and state](#terraform-and-state) | [CI/CD](#cicd) | [Operating and testing](#operating-and-testing)
 
 ---
 
 ## Design and flow
 
 ### What happens when an order is created?
-`CreateOrder` validates the request, generates an `orderId`, saves one DynamoDB item per order line in a single transaction, then publishes an `OrderCreated` event to the `orders-<env>` bus and returns `201`. Two rules on that bus then work independently: one feeds the fulfilment queue, the other publishes a notification. See the diagrams in the [README](../README.md#architecture).
+A signed `POST /orders` reaches API Gateway, which validates the body against a JSON schema, writes one message to the intake SQS queue and answers `202 Accepted` with the new `orderId` straight away. `CreateOrder` then consumes the queue: it validates the message again, saves one DynamoDB item per order line in a single transaction, and only then publishes an `OrderCreated` event to the `orders-<env>` bus. Two rules on that bus work independently: one feeds the fulfilment queue, the other publishes a notification. See the diagrams in the [README](../README.md#architecture).
 
 ### Why Terraform and not a SAM template?
 Terraform was the requirement from the start, so the whole project, including the Lambdas, is in Terraform. There is no `template.yaml`. The same resources could be written as SAM; nothing in the design depends on the tool.
@@ -18,7 +18,7 @@ Terraform was the requirement from the start, so the whole project, including th
 So a failed save never produces an event for an order that does not exist. A save error returns `400` before any publish is attempted.
 
 ### What if the save works but the publish fails?
-The order stays saved and the function returns `500` with the `orderId`, so the caller knows it exists. **Nothing retries the publish**, so that order is never fulfilled or announced unless someone re-publishes it. The planned fix is DynamoDB Streams with EventBridge Pipes, so events come from the table itself; it is in [TODO.md](../TODO.md).
+The message goes back to the intake queue. On the retry `CreateOrder` finds the order already saved, confirms the stored order is the same one (same customer, lines and quantities), and publishes again, so a saved order is not left unannounced. Only if it fails three times does the message land in the intake dead-letter queue, where the alarm reports it; the order is then saved but unannounced until the message is redriven (redrive is untried). Before the API and queue were added, this case returned a `500` and was never retried.
 
 ### Is anything exactly-once?
 No. EventBridge, SQS and SNS all deliver **at least once**. Fulfilment is safe against repeats because its write is conditional on the `orderId`. The notification path does not deduplicate, so a rare repeat could send two identical emails. `CreateOrder` has no idempotency key, so a client that retries a request creates a second order (on the to-do list).
@@ -33,6 +33,29 @@ Fulfilment and notification are independent: a failure in one does not affect th
 Source `orders.create-order`, detail-type `OrderCreated`, and a detail of `orderId`, `customerId`, `items` (each `itemId` and `quantity`) and `createdAt`. It carries only validated fields, never the raw request.
 
 ---
+
+## The order API
+
+### How do I call the API?
+`POST` JSON to the `order_api_url` output. The request must be signed with AWS credentials (SigV4) for a principal allowed `execute-api:Invoke`; curl 7.75 or newer can sign it with `--aws-sigv4`. The exact command is under "Try it" in the [README](../README.md#try-it).
+
+### Why does it answer `202` and not `201`?
+Because the order is accepted, not created. API Gateway has only queued it; saving it and publishing the event happen afterwards, so the caller never waits for DynamoDB or EventBridge. `201` would claim a result that does not exist yet.
+
+### How does a caller find out that an order failed?
+Today only through the alarm: a message that fails three times ends in the intake dead-letter queue and the alarm emails the alerts topic. The API gives no way to read an order's status, which is a known limitation. A status endpoint would be the next step.
+
+### Why is the order ID the request ID?
+So the caller has it in the `202` response without waiting, and so every retry of one queue message refers to the same order. A client that retries the whole HTTP request still creates a second order, because there is no idempotency key yet.
+
+### Why AWS IAM signing and not an API key or Cognito?
+It needs no extra service and keeps the endpoint closed to anyone without credentials, which suits service-to-service callers. An API key is not authentication. A Cognito or JWT authorizer would suit end users and is listed as an open gap (T1).
+
+### What does the API reject before anything is queued?
+An unsigned request (`403`), a body that does not match the schema (`400`: only `customerId`, `items`, `itemId` and `quantity`, with length and range limits, nothing else), a content type other than JSON (`415`), and requests over the throttle (`429`). The `400` and `500` messages are fixed and never echo what the caller sent.
+
+### Why can I not send a test message to the intake queue myself?
+The queue policy denies `sqs:SendMessage` to everyone except the API's role, administrators included, for the same reason as the bus policy: the queue is a trust boundary. To test, call the API. `CreateOrder` also re-validates every message, so a forged one could not store extra data.
 
 ## EventBridge
 
@@ -141,7 +164,7 @@ Nothing uses `*` as a resource or a wildcard action.
 Only the matching EventBridge rule, enforced with an `aws:SourceArn` condition. Both queues and both topics also deny requests that do not use TLS.
 
 ### What is not secured yet?
-No customer-managed keys, no API in front of `CreateOrder` (so no authentication), state kept in a shared bucket, and no static scanning in CI. See the known gaps in the [README](../README.md#security).
+No customer-managed keys, no API in front of `CreateOrder` (so no authentication), state kept in a shared bucket, and no static scanning in CI. See the known gaps in the [README](../README.md#security-design).
 
 ---
 
@@ -211,7 +234,7 @@ No. `validate.yml` uses no credentials, and `deploy.yml` never runs on pull requ
 ## Operating and testing
 
 ### How do I test the whole flow?
-Run the `CreateOrder` invoke command from the [README quick start](../README.md#quick-start), then read the new `orderId` from `Fulfilments-<env>` and check your inbox. A normal order shows `FULFILLED` within about a second.
+Run the `CreateOrder` invoke command from the [README quick start](../README.md#try-it), then read the new `orderId` from `Fulfilments-<env>` and check your inbox. A normal order shows `FULFILLED` within about a second.
 
 ### The dashboard widgets are empty. Is something broken?
 Usually not. Metrics appear only after events flow and can take a minute or two to show, and a narrow time range at the top right can miss them. Create a test order and widen the range.

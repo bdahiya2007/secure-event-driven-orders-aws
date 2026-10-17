@@ -35,3 +35,17 @@ skip-check:
   # The deploy role's trust policy pins the repository by immutable owner and repository ID plus the
   # environment, which is stricter than the repo-name pattern this rule recognises (false positive).
   - CKV_AWS_358
+  # The order API only queues orders (POST), so a response cache would be pointless, and a client certificate
+  # is for authenticating API Gateway to an HTTP backend, which this AWS-service integration is not.
+  - CKV_AWS_120
+  - CKV_AWS_225
+  - CKV2_AWS_51
+  # A WAF costs about $6 a month; the API is protected by AWS IAM signing, request validation and throttling.
+  - CKV2_AWS_29
+  # Access and execution logging need an account-wide API Gateway CloudWatch role, a setting shared with other
+  # projects in the account. It is listed as an open gap (T7) in the threat model. Tracing is skipped for the
+  # same reason as the Lambda functions.
+  - CKV2_AWS_4
+  - CKV_AWS_76
+  - CKV_AWS_73
+

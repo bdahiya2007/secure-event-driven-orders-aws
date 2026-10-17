@@ -9,6 +9,7 @@ terraform/
 ├── modules/
 │   ├── dynamodb/            # orders table (on-demand, SSE, PITR, deletion protection)
 │   ├── eventbridge/         # custom event bus
+│   ├── order_api/           # REST API: schema validation, SQS integration, throttling, IAM auth
 │   ├── notification_topic/  # SNS topic for order notifications, EventBridge-only publish policy
 │   ├── dashboard/           # CloudWatch dashboard (MatchedEvents, NumberOfMessagesSent, NumberOfMessagesPublished)
 │   ├── alerts/              # SNS topic for operational alerts, optional email subscriber
@@ -40,7 +41,7 @@ terraform apply
 
 ## Outputs
 
-Each environment exposes: `orders_table_name`, `orders_table_arn`, `fulfilments_table_name`, `event_bus_name`, `event_bus_arn`, `create_order_function_name`, `fulfil_order_function_name`, `fulfilment_queue_url`, `fulfilment_dlq_url`, `order_notifications_topic_arn`, `alerts_topic_arn` and `dashboard_url`. Read one with `terraform output -raw <name>`.
+Each environment exposes: `orders_table_name`, `orders_table_arn`, `fulfilments_table_name`, `event_bus_name`, `event_bus_arn`, `create_order_function_name`, `fulfil_order_function_name`, `order_api_url`, `intake_queue_url`, `intake_dlq_url`, `fulfilment_queue_url`, `fulfilment_dlq_url`, `order_notifications_topic_arn`, `alerts_topic_arn` and `dashboard_url`. Read one with `terraform output -raw <name>`.
 
 ## Variables
 
@@ -172,6 +173,37 @@ Inspect the dead-letter queue with:
 aws sqs get-queue-attributes --queue-url "$(terraform output -raw fulfilment_dlq_url)" \
   --attribute-names ApproximateNumberOfMessages
 ```
+
+## Order intake (API Gateway and SQS)
+
+`modules/order_api` creates a REST API with one route, `POST /orders`, wired straight to the `order-intake-<env>` SQS queue with no Lambda in the request path:
+
+- **Authorisation:** `AWS_IAM`. The request must be SigV4-signed by a principal allowed `execute-api:Invoke`.
+- **Validation:** the body must match a JSON schema (`customerId`, and `items` of `itemId` with an optional `quantity`, no other fields) or API Gateway answers `400` with a fixed message. Other content types get `415`.
+- **Message:** a mapping template builds the queue message from the validated fields, with `$context.requestId` as the `orderId` and the request time as `receivedAt`. The caller gets `202` with the `orderId` at once.
+- **Throttling:** 10 requests per second, burst 20, on the stage.
+- **Access:** the API assumes a role that can only `SendMessage` on that queue. The queue policy denies sending to everyone else, so nothing can write to it behind the API's back.
+
+`CreateOrder` consumes the queue in batches of 10 (at most 5 concurrent), with partial-batch failure reporting. A message that fails three times moves to `order-intake-<env>-dlq`, which has its own alarm. Message processing is retry-safe: a redelivery finds the order already stored, confirms it is the same one, and publishes again.
+
+Call it with a signed request (curl 7.75 or newer):
+
+```bash
+curl -s -X POST "$(terraform output -raw order_api_url)" \
+  --aws-sigv4 "aws:amz:us-east-1:execute-api" --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" \
+  -H "x-amz-security-token: $AWS_SESSION_TOKEN" -H "Content-Type: application/json" \
+  -d '{"customerId":"c1","items":[{"itemId":"i1","quantity":2}]}'
+```
+
+**Rolling it out.** The permissions boundary and the deploy role changed, and so did the permission set the owner applies locally:
+
+1. Add `apigateway.amazonaws.com` to the `iam:PassedToService` condition of the pass-role statement in your permission set (see [iam/deploy-iam-policy.json](iam/deploy-iam-policy.json)).
+2. Apply `terraform/bootstrap` (the boundary gains the intake queue and the API role's `SendMessage`, and the deploy role gains REST API, intake queue and alarm access).
+3. Merge; the pipeline creates the API, the queues and the new `CreateOrder` trigger.
+
+Until step 3 completes there is a short window where `CreateOrder` is triggered by the queue instead of being invoked directly, so a direct `aws lambda invoke` no longer works afterwards.
+
+**Not included.** API access logging and execution logging are off because they need an account-wide API Gateway CloudWatch role, which this project does not change. There is no WAF, cache or client certificate.
 
 ## Event authenticity
 

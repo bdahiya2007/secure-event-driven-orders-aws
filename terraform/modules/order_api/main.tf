@@ -24,6 +24,11 @@ resource "aws_api_gateway_rest_api" "this" {
   }
 
   tags = var.tags
+
+  # If the API ever has to be replaced, create the new one first so the endpoint is not left without one.
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_api_gateway_resource" "orders" {

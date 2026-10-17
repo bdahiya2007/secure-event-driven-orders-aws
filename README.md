@@ -7,21 +7,27 @@ Everything is Terraform.
 [![Validate](https://github.com/bdahiya2007/secure-event-driven-orders-aws/actions/workflows/validate.yml/badge.svg)](https://github.com/bdahiya2007/secure-event-driven-orders-aws/actions/workflows/validate.yml)
 [![Deploy](https://github.com/bdahiya2007/secure-event-driven-orders-aws/actions/workflows/deploy.yml/badge.svg)](https://github.com/bdahiya2007/secure-event-driven-orders-aws/actions/workflows/deploy.yml)
 
-A client creates an order. A Python Lambda validates it against an allow-list, saves one DynamoDB item per order line in a single
-transaction, and only then publishes an `OrderCreated` event to a custom EventBridge bus. Two rules on that bus work independently of
-each other and of the caller: one feeds an SQS queue that a second Lambda (`FulfilOrder`) consumes to record the fulfilment in its own
-table, the other publishes a short notification to an SNS topic. A dead-letter queue, a CloudWatch alarm and a dashboard make the
-failure paths visible.
+A client sends a signed `POST /orders` to API Gateway. The API validates the body against a JSON schema, puts one message on an SQS queue and
+immediately answers `202 Accepted` with the new `orderId`, without waiting for any processing. A Python Lambda (`CreateOrder`) consumes
+the queue, saves one DynamoDB item per order line in a single transaction, and only then publishes an `OrderCreated` event to a custom
+EventBridge bus. Two rules on that bus work independently of each other and of the caller: one feeds a second queue that `FulfilOrder`
+consumes to record the fulfilment in its own table, the other publishes a short notification to an SNS topic. Dead-letter queues, CloudWatch
+alarms and a dashboard make the failure paths visible.
 
-**State:** deployed and verified end to end in `dev` (order, fulfilment, notification email, dashboard, and a dead-letter queue alarm that
-was triggered on purpose). `prod` is defined from the same modules and has not been applied.
+**State:** the fulfilment, notification, dashboard and alarm paths are deployed and verified end to end in `dev`. The asynchronous intake
+(API Gateway and the intake queue in front of `CreateOrder`) is new and was tested offline; it is deployed by the pipeline on merge and
+has not been verified live yet. `prod` is defined from the same modules and has not been applied.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     client([Client])
-    apigw["API Gateway<br/>(planned)"]
+    subgraph intake [Order intake]
+        apigw["API Gateway<br/>POST /orders<br/>IAM signing, schema validation, throttling"]
+        iq[["SQS queue<br/>order intake"]]
+        idlq[["Dead-letter queue<br/>(intake)"]]
+    end
     fn["Lambda<br/>CreateOrder"]
     ddb[("DynamoDB<br/>Orders")]
     bus{{"EventBridge bus<br/>orders"}}
@@ -41,17 +47,19 @@ flowchart LR
     end
 
     subgraph operations [Operations]
-        alarm["CloudWatch alarm<br/>DLQ not empty"]
+        alarm["CloudWatch alarms<br/>a DLQ is not empty"]
         atopic{{"SNS topic<br/>alerts"}}
         aemail(["Email subscriber"])
         cw["CloudWatch Logs"]
         dash["CloudWatch dashboard"]
     end
 
-    client -.-> apigw -.-> fn
-    client -- "direct invoke" --> fn
-    fn -- "1. PutItem transaction<br/>(orderId + itemId)" --> ddb
-    fn -- "2. PutEvents<br/>OrderCreated" --> bus
+    client -- "1. signed POST" --> apigw
+    apigw -- "2. SendMessage<br/>(202 Accepted + orderId)" --> iq
+    iq --> fn
+    iq -- "after 3 failed receives" --> idlq
+    fn -- "3. PutItem transaction<br/>(orderId + itemId)" --> ddb
+    fn -- "4. PutEvents<br/>OrderCreated" --> bus
 
     bus --> rule --> sqs
     sqs --> ful
@@ -60,7 +68,9 @@ flowchart LR
 
     bus --> nrule --> sns --> email
 
-    dlq --> alarm --> atopic --> aemail
+    dlq --> alarm
+    idlq --> alarm
+    alarm --> atopic --> aemail
 
     rule -. MatchedEvents .-> dash
     nrule -. MatchedEvents .-> dash
@@ -68,14 +78,10 @@ flowchart LR
     sns -. NumberOfMessagesPublished .-> dash
     fn --> cw
     ful --> cw
-
-    classDef planned stroke-dasharray: 5 5,fill:none;
-    class apigw planned;
 ```
 
-Solid boxes and lines are deployed. The dashed API Gateway box is planned. Dotted arrows into the dashboard are metrics, not data flow.
-The caller gets its answer once the order is saved and the event is published; fulfilment and notification happen afterwards and
-cannot fail the request.
+Dotted arrows into the dashboard are metrics, not data flow. The caller gets its answer as soon as the order is queued; saving it,
+fulfilment and notification all happen afterwards and cannot fail the request.
 
 ### Order workflow
 
@@ -83,52 +89,51 @@ cannot fail the request.
 sequenceDiagram
     autonumber
     actor C as Client
+    participant A as API Gateway
+    participant I as Intake queue
     participant L as CreateOrder Lambda
     participant D as DynamoDB Orders
     participant E as EventBridge bus
-    participant Q as SQS queue
+    participant Q as Fulfilment queue
     participant F as FulfilOrder Lambda
     participant X as DynamoDB Fulfilments
     participant N as SNS notifications
 
-    C->>L: Create order (customerId, items)
-    L->>L: Validate request, generate orderId
-    alt invalid request
-        L-->>C: 400 Bad Request
+    C->>A: POST /orders (signed request)
+    alt unsigned or not permitted
+        A-->>C: 403 Forbidden
+    else body fails the schema
+        A-->>C: 400 Invalid request
     else valid
+        A->>I: SendMessage (orderId = request ID)
+        A-->>C: 202 Accepted (orderId)
+        I-)L: Batch of messages
+        L->>L: Validate again
         L->>D: TransactWriteItems (one item per order line)
-        alt save fails (e.g. duplicate itemId)
-            D-->>L: TransactionCanceled
-            L-->>C: 400, no event published
-        else saved
-            D-->>L: OK
-            L->>E: PutEvents OrderCreated
-            alt publish fails
-                E-->>L: FailedEntryCount > 0
-                L-->>C: 500 (order saved, orderId returned)
-            else published
-                E-->>L: OK
-                L-->>C: 201 Created (orderId)
-                par fulfilment
-                    E-)Q: Rule routes OrderCreated to queue
-                    Q-)F: Batch of messages
-                    F->>X: PutItem (skipped if already fulfilled)
-                    alt processing fails
-                        F-->>Q: Report failed message, retried then sent to dead-letter queue
-                    end
-                and notification
-                    E-)N: Rule publishes order message
-                    N-)C: Email to subscribers
-                end
+        L->>E: PutEvents OrderCreated
+        alt save or publish fails
+            L-->>I: Report failed message, retried (the retry re-publishes), then sent to the intake dead-letter queue
+        end
+        par fulfilment
+            E-)Q: Rule routes OrderCreated to queue
+            Q-)F: Batch of messages
+            F->>D: Query (does this order exist?)
+            F->>X: PutItem (skipped if already fulfilled)
+            alt processing fails
+                F-->>Q: Report failed message, retried then sent to dead-letter queue
             end
+        and notification
+            E-)N: Rule publishes order message
+            N-)C: Email to subscribers
         end
     end
 ```
 
 ## What this demonstrates
 
+- **Asynchronous intake:** the API validates and queues, answers `202` straight away, and a consumer saves and publishes; the whole path retries safely, so a saved order is never left unannounced.
 - **Event-driven design with clear failure semantics:** save first, publish second, fan out through EventBridge, buffer with SQS, retry with partial-batch failure reporting, dead-letter after three failed receives.
-- **Idempotent consumers:** a redelivered message is a successful no-op, because the fulfilment write is conditional on the `orderId`.
+- **Idempotent consumers:** a redelivered order is saved once and confirmed against what is stored, and a redelivered fulfilment is a no-op, because both writes are conditional on the `orderId`.
 - **Infrastructure as code, modular:** nine reusable Terraform modules shared by two environments, with remote locked state.
 - **Security by default:** least-privilege IAM per function, a permissions boundary on every role the pipeline creates, allow-listed input, TLS-only and source-scoped queue and topic policies, no stored credentials.
 - **Delivery discipline:** pull requests are checked offline (format, validate, unit tests, `bandit`, `checkov`, secret scan); pushes to `main` deploy through GitHub OIDC with a guard that refuses to delete or replace anything automatically.
@@ -155,7 +160,10 @@ The full analysis, with each threat, its control and what is still open, is in t
 
 | Area | What is in place |
 |---|---|
-| **Input handling** | `CreateOrder` stores only `customerId`, `itemId` and `quantity`, with type and length checks (IDs up to 64 characters, quantity 1 to 1000, up to 100 lines, body up to 256 KB). Unknown fields are dropped, so a caller cannot store arbitrary data or override the server-set `orderId` and `createdAt`. No price field is accepted. `FulfilOrder` re-validates every message instead of trusting the event. |
+| **Authentication and authorisation** | `POST /orders` requires an AWS-signed request (SigV4) from a principal allowed `execute-api:Invoke`; unsigned requests get `403`. This is for AWS principals, not for end users (see the open gaps). |
+| **Request validation and throttling** | API Gateway rejects a body that does not match the JSON schema (only `customerId`, `items`, `itemId`, `quantity`, with length and range limits, no other fields) before anything is queued, with a fixed `400` message that does not echo the input. The stage is throttled to 10 requests per second (burst 20), and unsupported content types get `415`. |
+| **Intake queue** | Only the API's role may send to it (an explicit deny covers everyone else, administrators included); it is encrypted, TLS-only and dead-lettered after three failed receives, with its own alarm. API Gateway's role can do nothing but `SendMessage` on that queue. |
+| **Input handling** | `CreateOrder` validates every message again against an allow-list (IDs up to 64 characters, quantity 1 to 1000, up to 100 lines, unique item IDs, a lowercase UUID `orderId`) and drops unknown fields, so nothing on the queue can store arbitrary data. No price field is accepted. `FulfilOrder` re-validates every message instead of trusting the event. |
 | **No overwrites, no half orders** | Order lines are written in one transaction with a condition expression, so a duplicate `itemId` rejects the whole order. |
 | **Least-privilege IAM** | `CreateOrder` can write its own logs, `PutItem` on the Orders table and `PutEvents` on the one bus. `FulfilOrder` can write its own logs, read and delete from the one queue, and `PutItem` on the Fulfilments table. No `*` actions or resources. |
 | **Permissions boundary** | Both Lambda roles carry `orders-pipeline-app-role-boundary`, a ceiling that caps them at exactly those actions, even if a role policy were widened later. |
@@ -176,16 +184,17 @@ Residual risks from the [threat model](docs/THREAT_MODEL.md), highest first. Eac
 
 | Threat | Risk | Gap | Planned fix |
 |---|---|---|---|
-| **T1** | Medium, High once exposed | `CreateOrder` has no authentication layer; it is protected only by IAM permission to invoke it | API Gateway with an authorizer and request validation |
-| **T11** | Medium | No throttling, reserved concurrency or budget alarm, so a flood of requests means cost and exhausted concurrency | Throttling at the API, a concurrency limit, an AWS Budget alert |
-| **T14** | Medium | An order that is saved but whose event fails to publish is never fulfilled or announced; nothing retries the publish | DynamoDB Streams with EventBridge Pipes |
+| **T1** | Medium | The API accepts AWS-signed requests only; there is no end-user identity, so it is not safe to expose to browsers or customers | A Cognito or JWT authorizer |
+| **T11** | Low | The stage is throttled and the consumer capped, but there is no per-caller quota, reserved concurrency or budget alarm | A usage plan, a reserved concurrency limit, an AWS Budget alert |
+| **T14** | Low | A message that fails three times leaves the order saved but unannounced, in the intake dead-letter queue, until redriven | Redrive tooling (untried) |
 | **T16** | Medium | The `dev` and `prod` environments are not tied to a branch and have no approval gate, because a private repository on the free GitHub plan cannot use either | Make the repository public or upgrade, then restrict to protected branches and require approval for `prod` |
 | **T22** | Medium | The full plan and apply output in the Actions log prints ARNs and the account ID | Hide the plan output and mask the account ID before the repository is made public |
-| **T7** | Medium | The caller's identity is not stored with an order, and CloudTrail coverage of these services is not verified | Record the caller from the API, and confirm or add a CloudTrail trail |
+| **T7** | Medium | The caller's identity is not stored with an order, API access logging is off (it needs an account-wide API Gateway logging role), and CloudTrail coverage is unverified | Record the caller, add API access logs, confirm CloudTrail |
 | T8, T9 | Low | SNS topics are unencrypted; tables use the AWS-managed key | A customer-managed KMS key |
 | T15 | Low | No idempotency key on create, and a repeat could send two notification emails | Accept and store a client-supplied key |
 | T18 | Low | `dev` has no deletion protection, and the pipeline's no-delete guard can be overridden by hand | Keep the override manual and logged |
 | T19 | Low | The transitive packages of `bandit` and `checkov` are not pinned (they run with no AWS credentials) | A hashed requirements file for the scan tools |
+| T25 | Low | The deploy role can manage REST APIs in the account, not only this project's, because API IDs are not known in advance | Tag-based access control |
 | T21 | Low | The Terraform state holds the subscription emails in plain text and sits in a bucket shared with another project | A dedicated state bucket, or exclude the addresses from state |
 
 ## Cost awareness
@@ -223,10 +232,10 @@ There is no VPC, NAT gateway or provisioned capacity. See the [FAQ](docs/FAQ.md#
     ├── iam/                   # IAM statements the deploying identity needs
     ├── modules/
     │   ├── alerts/            # SNS topic for alarms
-    │   ├── create_order/      # CreateOrder Lambda, IAM role, log group
+    │   ├── create_order/      # CreateOrder Lambda, IAM role, log group, SQS trigger
     │   ├── dashboard/         # CloudWatch dashboard
     │   ├── dynamodb/          # DynamoDB table (on-demand, encrypted, PITR, deletion protection)
-    │   ├── event_queue/       # SQS queue, dead-letter queue, policies, dead-letter alarm
+    │   ├── event_queue/       # SQS queue (intake and fulfilment), dead-letter queue, policies, alarm
     │   ├── event_rule/        # EventBridge rule to a target
     │   ├── eventbridge/       # custom event bus
     │   ├── fulfil_order/      # FulfilOrder Lambda, IAM role, SQS trigger
@@ -248,22 +257,28 @@ terraform apply
 ```
 
 Subscribe an address to the notification and alert topics with `notification_email` and `alert_email`, kept in a git-ignored
-`emails.auto.tfvars`; confirm the two emails AWS sends. Then create an order:
+`emails.auto.tfvars`; confirm the two emails AWS sends. Then create an order. The API needs a signed request, so use credentials
+allowed `execute-api:Invoke` (curl 7.75 or newer signs requests itself):
 
 ```bash
-aws lambda invoke --function-name CreateOrder-dev \
-  --cli-binary-format raw-in-base64-out \
-  --payload '{"customerId":"c1","items":[{"itemId":"i1","quantity":2}]}' out.json
-cat out.json
+URL=$(terraform output -raw order_api_url)
+curl -s -X POST "$URL" \
+  --aws-sigv4 "aws:amz:us-east-1:execute-api" --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" \
+  -H "x-amz-security-token: $AWS_SESSION_TOKEN" -H "Content-Type: application/json" \
+  -d '{"customerId":"c1","items":[{"itemId":"i1","quantity":2}]}'
 ```
 
 | Response | Meaning |
 |---|---|
-| `201` | Saved and published; body is `{"orderId": "..."}` |
-| `400` | Invalid request, or a duplicate `itemId` in the order. Nothing was saved or published |
-| `500` | An AWS error. If the body contains an `orderId`, the order was saved but the event could not be published |
+| `202` | Accepted: the order is queued, not yet saved. Body is `{"orderId": "...", "status": "ACCEPTED"}` |
+| `400` | The body does not match the schema. Nothing was queued |
+| `403` | The request was not signed, or the caller may not invoke the API |
+| `415` | The content type is not `application/json` |
+| `429` | Throttled |
+| `500` | The queue could not be written; nothing was accepted |
 
-A second or two later, `Fulfilments-dev` holds a `FULFILLED` record for that `orderId` and the notification email arrives. Full
+A moment later the order is saved, `Fulfilments-dev` holds a `FULFILLED` record for that `orderId`, and the notification email arrives.
+Because the answer is only `202`, a client learns about a failed order from the dead-letter alarm, not from the response. Full
 setup, variables and the dashboard are in the [Terraform reference](terraform/README.md).
 
 ## CI/CD
@@ -281,7 +296,10 @@ safeguards are described in the [Terraform reference](terraform/README.md#cicd-g
 ## Design decisions
 
 - **Terraform, not SAM.** The whole stack, including the Lambdas and the pipeline role, is one tool. Nothing in the design depends on it.
-- **Save first, publish second.** A failed save never produces an event for an order that does not exist. The reverse gap (saved, publish failed) returns a `500` carrying the `orderId`; closing it needs DynamoDB Streams with EventBridge Pipes.
+- **Queue first, then process.** API Gateway writes straight to SQS with no Lambda in the request path, so the caller is never held up by DynamoDB or EventBridge, and a burst piles up in the queue instead of failing. The cost is that `202` means accepted, not created.
+- **Save first, publish second, and retry the pair.** A failed save never produces an event for an order that does not exist. If the publish fails after a successful save, the message returns to the queue; the retry finds the order already stored, confirms it is the same order, and publishes again, so a saved order is not left unannounced.
+- **The request ID is the order ID.** API Gateway's request ID (a UUID) is the `orderId`, so the caller has it immediately and every retry of one message refers to the same order. A client that retries the whole request still creates a second order (no idempotency key yet).
+- **AWS IAM signing for the API.** It needs no extra service and keeps the endpoint closed to anyone without credentials. It suits service-to-service callers; an end-user flow would add Cognito or another authorizer.
 - **EventBridge, then SQS.** The bus lets consumers be added without touching `CreateOrder` (the notification rule was added that way). The queue absorbs bursts, retries failures and keeps unprocessable messages in a dead-letter queue.
 - **At-least-once everywhere, idempotent where it matters.** Fulfilment is safe against repeats; the notification path is not deduplicated, so a rare repeat could send two emails.
 - **Two SNS topics.** Order messages and operational alarms go to different topics so different people can subscribe.
@@ -296,9 +314,9 @@ More questions and answers are in the [FAQ](docs/FAQ.md).
 
 | Gap | Impact | Next step |
 |---|---|---|
-| **No API in front of `CreateOrder`** | It is invoked directly, so there is no authentication, throttling or request validation at the edge | API Gateway with an authorizer, schema validation and throttling |
+| **No end-user authentication** | The API accepts AWS-signed requests only, so it suits other services, not browsers or customers | Add a Cognito or JWT authorizer |
 | **Fulfilment only records `FULFILLED`** | There is no inventory or shipping logic | Real processing in `FulfilOrder` |
-| **Saved but not published** | If the publish fails after a successful save, the order is never fulfilled or announced | DynamoDB Streams with EventBridge Pipes |
+| **A failed order is only visible as an alarm** | The caller gets `202` before the order is saved, so a message that fails three times ends in the intake dead-letter queue and the alarm; the order may be saved but unannounced until it is redriven | Redrive tooling, and an order status the caller can read |
 | **No idempotency key on create** | A client retry creates a second order | Accept and store a client-supplied key |
 | **SNS topics and table keys** | Topics are unencrypted (EventBridge and CloudWatch need a customer-managed key); tables use the AWS-managed key | A customer-managed KMS key |
 | **No event replay** | An event with no matching rule, or a consumer added later, cannot see past events | An EventBridge archive |
