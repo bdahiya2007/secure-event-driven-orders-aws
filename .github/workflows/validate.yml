@@ -82,3 +82,60 @@ jobs:
         env:
           SECRET_SCAN_LITERALS: ${{ secrets.SECRET_SCAN_LITERALS }}
         run: python3 scripts/secret-scan.py --range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+
+  # Unit tests use only the standard library and stand-ins for boto3, so they need no installs,
+  # no AWS credentials and no network.
+  lambda-tests:
+    name: Lambda unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run unit tests
+        run: python3 -m unittest discover -s tests -v
+
+  # Static security analysis of the Lambda code. The tool is installed into a throwaway virtual
+  # environment on the runner; nothing is added to the Lambda packages.
+  python-security:
+    name: Python security scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install bandit
+        run: |
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install --quiet "bandit>=1.8,<2"
+          "$RUNNER_TEMP/tools/bin/pip" freeze | grep -i '^bandit=='
+
+      - name: Scan Lambda code with bandit
+        run: |
+          "$RUNNER_TEMP/tools/bin/bandit" -r terraform/modules/create_order/src terraform/modules/fulfil_order/src
+
+  # Static analysis of the Terraform for insecure configuration. Reviewed, intentional findings
+  # are listed with reasons in .checkov.yaml.
+  terraform-security:
+    name: Terraform security scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install checkov
+        run: |
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install --quiet "checkov>=3.2,<4"
+          "$RUNNER_TEMP/tools/bin/pip" freeze | grep -i '^checkov=='
+
+      - name: Scan Terraform with checkov
+        run: |
+          "$RUNNER_TEMP/tools/bin/checkov" --config-file .checkov.yaml --soft-fail
+
