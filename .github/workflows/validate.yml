@@ -111,7 +111,7 @@ jobs:
       - name: Install bandit
         run: |
           python3 -m venv "$RUNNER_TEMP/tools"
-          "$RUNNER_TEMP/tools/bin/pip" install --quiet "bandit>=1.8,<2"
+          "$RUNNER_TEMP/tools/bin/pip" install --quiet bandit==1.9.4
           "$RUNNER_TEMP/tools/bin/pip" freeze | grep -i '^bandit=='
 
       - name: Scan Lambda code with bandit
@@ -132,10 +132,10 @@ jobs:
       - name: Install checkov
         run: |
           python3 -m venv "$RUNNER_TEMP/tools"
-          "$RUNNER_TEMP/tools/bin/pip" install --quiet "checkov>=3.2,<4"
+          "$RUNNER_TEMP/tools/bin/pip" install --quiet checkov==3.3.29
           "$RUNNER_TEMP/tools/bin/pip" freeze | grep -i '^checkov=='
 
       - name: Scan Terraform with checkov
         run: |
-          "$RUNNER_TEMP/tools/bin/checkov" --config-file .checkov.yaml --soft-fail
+          "$RUNNER_TEMP/tools/bin/checkov" --config-file .checkov.yaml
 

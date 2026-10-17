@@ -174,7 +174,7 @@ It copies the local state file into the new S3 backend the first time you switch
 ## CI/CD
 
 ### What do the workflows do?
-`validate.yml` runs offline on pull requests (format, validate, handler compile check). `deploy.yml` runs on pushes to `main`: checks, `plan`, a guard against deletions, then `apply` of that saved plan. Details in [terraform/README.md](../terraform/README.md#cicd-github-actions). They have not run yet because the project is not pushed to GitHub.
+`validate.yml` runs offline on pull requests (format, validate, handler compile check, unit tests, `bandit`, `checkov` and the secret scan). `deploy.yml` runs on pushes to `main`: checks, `plan`, a guard against deletions, then `apply` of that saved plan. Details in [terraform/README.md](../terraform/README.md#cicd-github-actions). They have not run yet because the project is not pushed to GitHub.
 
 ### Where is the SAM `package` and `update-function-code` step?
 There is none, because the project is Terraform. The `archive_file` data sources zip each handler during `plan`, and `apply` updates a Lambda when its code hash changes.
@@ -187,6 +187,15 @@ The deploy role must be able to create the two Lambda execution roles, which in 
 
 ### Why is the bootstrap applied by hand?
 So the pipeline cannot change its own permissions. A compromised workflow can deploy the stack but cannot widen the role that deploys it. It also has to exist before the first pipeline run.
+
+### What do the unit tests cover, and are they trustworthy?
+Both Lambdas have standard-library tests (`python3 -m unittest discover -s tests`) that replace `boto3` with stand-ins, so they need no AWS access or installs. They cover validation limits, the save-before-publish order, hostile input being dropped, the failure paths and the batch handling in `FulfilOrder`. They were checked by seeding seven deliberate bugs (for example ignoring a failed publish, allowing a boolean quantity, dropping the duplicate-order condition); every one made a test fail.
+
+### Why are some checkov findings skipped?
+The first run reported 19 findings across nine rules. Each skip in `.checkov.yaml` has a reason: for example unencrypted SNS topics (EventBridge and CloudWatch need a customer-managed key, which is on the to-do list), no VPC (a NAT gateway would cost money for no benefit), and no code signing. Any new finding fails the pull request check.
+
+### Why is there no `pip-audit` step?
+The Lambdas use only the standard library and the `boto3` that the runtime provides, so there is no pinned dependency list to audit. Add it when a `requirements.txt` exists.
 
 ### Why did a deploy stop with "the plan would delete or replace resources"?
 The guard refuses automatic deletions, because a replaced DynamoDB table loses its data. The most common cause is a missing repository secret: an empty `NOTIFICATION_EMAIL` or `ALERT_EMAIL` would delete that subscription. Set the secret and re-run, or run manually with `allow_destroy` if the deletion is intended.
