@@ -22,9 +22,18 @@ locals {
     "arn:aws:dynamodb:${local.region}:${local.account_id}:table/Orders-*",
     "arn:aws:dynamodb:${local.region}:${local.account_id}:table/Fulfilments-*",
   ]
-  bus_arn   = "arn:aws:events:${local.region}:${local.account_id}:event-bus/orders-*"
-  rule_arn  = "arn:aws:events:${local.region}:${local.account_id}:rule/orders-*/*"
-  queue_arn = "arn:aws:sqs:${local.region}:${local.account_id}:order-fulfilment-*"
+  bus_arn  = "arn:aws:events:${local.region}:${local.account_id}:event-bus/orders-*"
+  rule_arn = "arn:aws:events:${local.region}:${local.account_id}:rule/orders-*/*"
+  queue_arns = [
+    "arn:aws:sqs:${local.region}:${local.account_id}:order-fulfilment-*",
+    "arn:aws:sqs:${local.region}:${local.account_id}:order-intake-*",
+  ]
+  intake_queue_arn = "arn:aws:sqs:${local.region}:${local.account_id}:order-intake-*"
+  apigw_arns = [
+    "arn:aws:apigateway:${local.region}::/restapis",
+    "arn:aws:apigateway:${local.region}::/restapis/*",
+    "arn:aws:apigateway:${local.region}::/tags/*",
+  ]
   topic_arns = [
     "arn:aws:sns:${local.region}:${local.account_id}:order-notifications-*",
     "arn:aws:sns:${local.region}:${local.account_id}:orders-alerts-*",
@@ -61,10 +70,17 @@ data "aws_iam_policy_document" "boundary" {
     resources = [local.table_arns[0]]
   }
 
+  # The API's role sends accepted orders to the intake queue.
+  statement {
+    sid       = "SendOrdersToIntakeQueue"
+    actions   = ["sqs:SendMessage"]
+    resources = [local.intake_queue_arn]
+  }
+
   statement {
     sid       = "ConsumeFulfilmentQueue"
     actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
-    resources = [local.queue_arn]
+    resources = local.queue_arns
   }
 }
 
@@ -139,7 +155,7 @@ data "aws_iam_policy_document" "deploy" {
   statement {
     sid       = "FulfilmentQueues"
     actions   = ["sqs:*"]
-    resources = [local.queue_arn]
+    resources = local.queue_arns
   }
 
   statement {
@@ -152,6 +168,14 @@ data "aws_iam_policy_document" "deploy" {
     sid       = "Functions"
     actions   = ["lambda:*"]
     resources = local.function_arns
+  }
+
+  # REST APIs get an ID when they are created, so they cannot be scoped by name. The role can manage REST APIs in
+  # this account and region; it cannot touch other services. Narrowing this with tags is a possible follow-up.
+  statement {
+    sid       = "RestApis"
+    actions   = ["apigateway:GET", "apigateway:POST", "apigateway:PUT", "apigateway:PATCH", "apigateway:DELETE"]
+    resources = local.apigw_arns
   }
 
   # The ARN of an event source mapping is not known before it is created.
@@ -191,7 +215,10 @@ data "aws_iam_policy_document" "deploy" {
       "cloudwatch:UntagResource",
       "cloudwatch:ListTagsForResource",
     ]
-    resources = ["arn:aws:cloudwatch:${local.region}:${local.account_id}:alarm:order-fulfilment-*"]
+    resources = [
+      "arn:aws:cloudwatch:${local.region}:${local.account_id}:alarm:order-fulfilment-*",
+      "arn:aws:cloudwatch:${local.region}:${local.account_id}:alarm:order-intake-*",
+    ]
   }
 
   statement {
@@ -228,14 +255,14 @@ data "aws_iam_policy_document" "deploy" {
   }
 
   statement {
-    sid       = "PassAppRolesToLambda"
+    sid       = "PassAppRolesToLambdaAndApiGateway"
     actions   = ["iam:PassRole"]
     resources = local.app_role_arns
 
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"
-      values   = ["lambda.amazonaws.com"]
+      values   = ["lambda.amazonaws.com", "apigateway.amazonaws.com"]
     }
   }
 

@@ -20,20 +20,25 @@ resource "aws_sqs_queue" "this" {
 
 # Only the one EventBridge rule may send to the queue, and only over TLS.
 data "aws_iam_policy_document" "queue" {
-  statement {
-    sid       = "AllowEventBridgeRule"
-    actions   = ["sqs:SendMessage"]
-    resources = [aws_sqs_queue.this.arn]
+  # Only the one EventBridge rule may send (for a queue fed by a rule).
+  dynamic "statement" {
+    for_each = var.allowed_source_arn == null ? [] : [var.allowed_source_arn]
 
-    principals {
-      type        = "Service"
-      identifiers = ["events.amazonaws.com"]
-    }
+    content {
+      sid       = "AllowEventBridgeRule"
+      actions   = ["sqs:SendMessage"]
+      resources = [aws_sqs_queue.this.arn]
 
-    condition {
-      test     = "ArnEquals"
-      variable = "aws:SourceArn"
-      values   = [var.allowed_source_arn]
+      principals {
+        type        = "Service"
+        identifiers = ["events.amazonaws.com"]
+      }
+
+      condition {
+        test     = "ArnEquals"
+        variable = "aws:SourceArn"
+        values   = [statement.value]
+      }
     }
   }
 
@@ -52,6 +57,33 @@ data "aws_iam_policy_document" "queue" {
       test     = "Bool"
       variable = "aws:SecureTransport"
       values   = ["false"]
+    }
+  }
+
+  # Only the listed roles may send (for a queue fed by an API). An explicit Deny also binds administrators.
+  dynamic "statement" {
+    for_each = length(var.sender_role_arns) > 0 ? [1] : []
+
+    content {
+      sid       = "DenySendExceptSenders"
+      effect    = "Deny"
+      actions   = ["sqs:SendMessage"]
+      resources = [aws_sqs_queue.this.arn]
+
+      principals {
+        type        = "*"
+        identifiers = ["*"]
+      }
+
+      # A role may appear as its role ARN or as an assumed-role session ARN, so allow both forms.
+      condition {
+        test     = "ArnNotLike"
+        variable = "aws:PrincipalArn"
+        values = concat(
+          var.sender_role_arns,
+          [for arn in var.sender_role_arns : "${replace(replace(arn, "arn:aws:iam::", "arn:aws:sts::"), ":role/", ":assumed-role/")}/*"],
+        )
+      }
     }
   }
 }

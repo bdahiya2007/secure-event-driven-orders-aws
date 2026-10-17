@@ -45,3 +45,16 @@ output "order_notifications_topic_arn" {
 output "dashboard_url" {
   value = "https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#dashboards/dashboard/${module.dashboard.dashboard_name}"
 }
+
+output "order_api_url" {
+  description = "POST <url>/orders with a SigV4-signed request"
+  value       = "${module.order_api.invoke_url}/orders"
+}
+
+output "intake_queue_url" {
+  value = module.intake_queue.queue_url
+}
+
+output "intake_dlq_url" {
+  value = module.intake_queue.dlq_url
+}

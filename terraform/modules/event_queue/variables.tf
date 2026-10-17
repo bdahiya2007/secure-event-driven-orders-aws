@@ -4,8 +4,15 @@ variable "queue_name" {
 }
 
 variable "allowed_source_arn" {
-  description = "ARN of the EventBridge rule allowed to send messages to the queue"
+  description = "ARN of the EventBridge rule allowed to send messages to the queue; null for a queue not fed by a rule"
   type        = string
+  default     = null
+}
+
+variable "sender_role_arns" {
+  description = "IAM role ARNs allowed to send messages; everyone else is denied. Empty applies no restriction"
+  type        = list(string)
+  default     = []
 }
 
 variable "visibility_timeout_seconds" {
