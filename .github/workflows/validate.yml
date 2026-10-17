@@ -1,0 +1,84 @@
+name: Validate Terraform and Lambda
+
+# Runs on every pull request targeting main. Fully offline: no AWS credentials are used, so a pull request can never touch AWS. Deployment is in deploy.yml and runs
+# only on pushes to main.
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: validate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: '0'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate Terraform and Lambda
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.16.3
+          terraform_wrapper: false
+
+      - name: Check Terraform formatting
+        run: terraform fmt -check -recursive -diff terraform
+
+      # -backend=false: no state or AWS access is needed to validate the configuration.
+      - name: Validate environments/dev
+        working-directory: terraform/environments/dev
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+      - name: Validate environments/prod
+        working-directory: terraform/environments/prod
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+      - name: Check Lambda code compiles
+        run: python3 -I -m py_compile terraform/modules/create_order/src/handler.py terraform/modules/fulfil_order/src/handler.py
+
+  # Blocks secrets and sensitive data before they reach the repository. The optional repository
+  # secret SECRET_SCAN_LITERALS (one value per line, e.g. the AWS account ID) adds an exact-match
+  # block list that can never be written in the repo. Fully offline, no AWS credentials.
+  secret-scan:
+    name: Scan for secrets and sensitive data
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Scanner self-test
+        run: python3 scripts/secret-scan.py --self-test
+
+      - name: Scan all tracked files
+        env:
+          SECRET_SCAN_LITERALS: ${{ secrets.SECRET_SCAN_LITERALS }}
+        run: python3 scripts/secret-scan.py --all-tracked
+
+      - name: Scan every commit in the pull request
+        if: github.event_name == 'pull_request'
+        env:
+          SECRET_SCAN_LITERALS: ${{ secrets.SECRET_SCAN_LITERALS }}
+        run: python3 scripts/secret-scan.py --range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"

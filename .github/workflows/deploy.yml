@@ -1,0 +1,139 @@
+name: Deploy Terraform
+
+# Deploys the orders stack on every push to main (documentation-only changes are skipped).
+#
+# Terraform does the packaging: the archive_file data sources zip each Lambda's src/handler.py
+# during plan, and apply updates a function when its code hash changes, so there is no separate
+# update-function-code step.
+#
+# Authenticates via GitHub OIDC: no long-lived AWS credentials are stored in this repo. GitHub
+# Actions assumes AWS_DEPLOY_ROLE_ARN directly; AWS trusts the request based on a short-lived token
+# whose "sub" claim is checked against this exact repository (by immutable ID) and the dev or prod
+# GitHub environment. The role is created by terraform/bootstrap, which is applied manually and
+# never by this workflow, so the pipeline cannot change its own permissions.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions -> Secrets):
+#   AWS_DEPLOY_ROLE_ARN    - the deploy_role_arn output of terraform/bootstrap
+#   TF_STATE_BUCKET        - S3 bucket holding the Terraform state (name contains the account ID)
+#   NOTIFICATION_EMAIL     - address subscribed to the order notifications topic
+#   ALERT_EMAIL            - address subscribed to the alarm topic
+# If an email secret is missing, the plan would delete that subscription, and the destroy guard
+# below stops the run instead of applying it.
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+      allow_destroy:
+        description: 'Allow this run to delete or replace resources (tables lose their data). Leave false for normal deploys.'
+        type: boolean
+        default: false
+
+# One deployment at a time: Terraform state is locked, and queued runs must not be cancelled midway.
+concurrency:
+  group: terraform-deploy-${{ inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: '0'
+  TF_VAR_notification_email: ${{ secrets.NOTIFICATION_EMAIL }}
+  TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
+  WORKDIR: terraform/environments/${{ inputs.environment || 'dev' }}
+
+jobs:
+  deploy:
+    name: Validate, plan and apply
+    runs-on: ubuntu-24.04
+    # Create a GitHub environment named like the target (dev, prod) to add required reviewers
+    # or environment-specific rules; without protection rules the job runs straight away.
+    environment: ${{ inputs.environment || 'dev' }}
+    timeout-minutes: 20
+    permissions:
+      id-token: write # required to request the OIDC token
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.16.3
+          terraform_wrapper: false
+
+      - name: Check Terraform formatting
+        run: terraform fmt -check -recursive terraform
+
+      - name: Check Lambda code compiles
+        run: python3 -I -m py_compile terraform/modules/create_order/src/handler.py terraform/modules/fulfil_order/src/handler.py
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        working-directory: ${{ env.WORKDIR }}
+        run: terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
+
+      - name: Terraform validate
+        working-directory: ${{ env.WORKDIR }}
+        run: terraform validate
+
+      - name: Terraform plan
+        working-directory: ${{ env.WORKDIR }}
+        run: terraform plan -no-color -out=tfplan
+
+      # The summary lists only the action and resource address, never ARNs or IDs.
+      - name: Summarize plan
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          changes=$(terraform show -json tfplan | jq -r '.resource_changes[] | select(.change.actions != ["no-op"]) | "\(.change.actions | join(",")) \(.address)"')
+          {
+            echo '## Terraform plan'
+            if [ -z "$changes" ]; then
+              echo 'No changes.'
+            else
+              echo '```'
+              echo "$changes"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # An automatic deploy must never delete or replace anything by surprise: a replaced table loses
+      # its data, and a missing secret would delete a subscription. Override with the allow_destroy input.
+      - name: Stop if the plan deletes or replaces resources
+        if: ${{ !inputs.allow_destroy }}
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          doomed=$(terraform show -json tfplan | jq -r '.resource_changes[] | select(.change.actions | index("delete")) | .address')
+          if [ -n "$doomed" ]; then
+            echo "::error::The plan would delete or replace the resources listed below. Check the repository secrets are all set (a missing email secret deletes its subscription), or re-run manually with allow_destroy if this is intended."
+            echo "$doomed"
+            exit 1
+          fi
+
+      # Applies exactly the saved plan. If state changed since the plan, Terraform refuses.
+      - name: Terraform apply
+        working-directory: ${{ env.WORKDIR }}
+        run: terraform apply -no-color tfplan
+
+      - name: Show non-sensitive outputs
+        working-directory: ${{ env.WORKDIR }}
+        run: terraform output -no-color event_bus_name create_order_function_name fulfil_order_function_name

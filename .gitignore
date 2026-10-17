@@ -1,0 +1,61 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+*.tfplan
+tfplan
+# Variable files may hold secrets (emails, bucket names): never commit one. A template named
+# *.tfvars.example with placeholders only may be committed.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+# Keep .terraform.lock.hcl committed so provider versions stay pinned.
+
+# Lambda build artifacts
+build/
+*.zip
+out.json
+
+# Secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials
+.aws/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Backend config holds the state bucket name (copy from backend.hcl.example)
+backend.hcl
+
+# Local to-do list, not published (same as secure-serverless-api-aws)
+TODO.md
+
+# Personal permission-set policy (copy of another project's statements); keep local only
+terraform/iam/combined-permission-set-policy.json
