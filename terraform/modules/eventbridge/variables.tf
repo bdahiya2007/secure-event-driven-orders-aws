@@ -8,3 +8,9 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "publisher_role_arns" {
+  description = "IAM role ARNs allowed to put events on the bus; everyone else is denied. Empty applies no restriction"
+  type        = list(string)
+  default     = []
+}

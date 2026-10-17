@@ -19,6 +19,9 @@ module "event_bus" {
   source = "../../modules/eventbridge"
 
   bus_name = "orders-${var.environment}"
+
+  # Only CreateOrder may publish; see the bus policy in the module.
+  publisher_role_arns = [module.create_order.role_arn]
 }
 
 module "create_order" {
@@ -69,6 +72,9 @@ module "fulfil_order" {
   queue_arn     = module.fulfilment_queue.queue_arn
   table_name    = module.fulfilments_table.table_name
   table_arn     = module.fulfilments_table.table_arn
+
+  orders_table_name = module.orders_table.table_name
+  orders_table_arn  = module.orders_table.table_arn
 
   permissions_boundary_arn = local.permissions_boundary_arn
 }

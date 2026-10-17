@@ -28,7 +28,7 @@ resource "aws_iam_role" "this" {
   tags                 = var.tags
 }
 
-# Least privilege: own log group, consume from the one queue, put into the one table.
+# Least privilege: own log group, consume from the one queue, put into the one table, query the Orders table.
 data "aws_iam_policy_document" "permissions" {
   statement {
     actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
@@ -43,6 +43,12 @@ data "aws_iam_policy_document" "permissions" {
   statement {
     actions   = ["dynamodb:PutItem"]
     resources = [var.table_arn]
+  }
+
+  # Read-only access to the Orders table, to confirm an event describes a stored order.
+  statement {
+    actions   = ["dynamodb:Query"]
+    resources = [var.orders_table_arn]
   }
 }
 
@@ -64,7 +70,8 @@ resource "aws_lambda_function" "this" {
 
   environment {
     variables = {
-      TABLE_NAME = var.table_name
+      TABLE_NAME        = var.table_name
+      ORDERS_TABLE_NAME = var.orders_table_name
     }
   }
 

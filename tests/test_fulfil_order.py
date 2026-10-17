@@ -4,7 +4,7 @@ import unittest
 from _stubs import ConditionalCheckFailedException, load_handler
 
 HANDLER = "terraform/modules/fulfil_order/src/handler.py"
-ENV = {"TABLE_NAME": "Fulfilments-test"}
+ENV = {"TABLE_NAME": "Fulfilments-test", "ORDERS_TABLE_NAME": "Orders-test"}
 
 
 def event(**overrides):
@@ -22,6 +22,10 @@ def event(**overrides):
     return body
 
 
+def stored_line(item_id, quantity, customer="cust-1"):
+    return {"itemId": {"S": item_id}, "quantity": {"N": str(quantity)}, "customerId": {"S": customer}}
+
+
 def record(message_id, body):
     return {"messageId": message_id, "body": body if isinstance(body, str) else json.dumps(body)}
 
@@ -30,7 +34,15 @@ class FulfilOrderTests(unittest.TestCase):
     def setUp(self):
         self.handler = load_handler(HANDLER, "fulfil_order_handler", ENV)
         self.puts = []
+        self.queries = []
         self.handler.dynamodb.put_item.side_effect = lambda **kw: self.puts.append(kw)
+        # By default the Orders table holds exactly the order that event() describes.
+        self.stored = [stored_line("a", 2), stored_line("b", 3)]
+        self.handler.dynamodb.query.side_effect = self.fake_query
+
+    def fake_query(self, **kwargs):
+        self.queries.append(kwargs)
+        return {"Items": list(self.stored)}
 
     def run_batch(self, *records):
         return self.handler.lambda_handler({"Records": list(records)}, None)
@@ -104,6 +116,76 @@ class FulfilOrderTests(unittest.TestCase):
         self.handler.dynamodb.put_item.side_effect = [RuntimeError("boom"), None]
         result = self.run_batch(record("first", event()), record("second", event()))
         self.assertEqual(self.failed_ids(result), ["first"])
+
+
+    # --- the event must describe an order that really exists ---
+
+    def test_the_stored_order_is_read_with_a_consistent_read_of_the_orders_table(self):
+        self.run_batch(record("m1", event()))
+        self.assertEqual(len(self.queries), 1)
+        query = self.queries[0]
+        self.assertEqual(query["TableName"], "Orders-test")
+        self.assertEqual(query["ExpressionAttributeValues"], {":o": {"S": "order-1"}})
+        self.assertTrue(query["ConsistentRead"])
+
+    def test_an_event_for_an_order_that_does_not_exist_is_rejected(self):
+        self.stored = []
+        result = self.run_batch(record("forged", event()))
+        self.assertEqual(self.failed_ids(result), ["forged"])
+        self.assertEqual(self.puts, [])
+
+    def test_an_event_for_a_different_customer_is_rejected(self):
+        self.stored = [stored_line("a", 2, "someone-else"), stored_line("b", 3, "someone-else")]
+        self.assertEqual(self.failed_ids(self.run_batch(record("m", event()))), ["m"])
+        self.assertEqual(self.puts, [])
+
+    def test_an_event_with_different_quantities_is_rejected(self):
+        self.stored = [stored_line("a", 2), stored_line("b", 4)]
+        self.assertEqual(self.failed_ids(self.run_batch(record("m", event()))), ["m"])
+        self.assertEqual(self.puts, [])
+
+    def test_an_event_with_extra_or_missing_lines_is_rejected(self):
+        for stored in ([stored_line("a", 2)], [stored_line("a", 2), stored_line("b", 3), stored_line("c", 1)]):
+            with self.subTest(lines=len(stored)):
+                self.stored = stored
+                self.assertEqual(self.failed_ids(self.run_batch(record("m", event()))), ["m"])
+        self.assertEqual(self.puts, [])
+
+    def test_duplicate_item_ids_in_an_event_are_rejected(self):
+        detail = event()["detail"]
+        duplicated = event(detail={**detail, "items": [{"itemId": "a", "quantity": 1}, {"itemId": "a", "quantity": 1}]})
+        self.assertEqual(self.failed_ids(self.run_batch(record("m", duplicated))), ["m"])
+        self.assertEqual(self.queries, [])
+
+    def test_a_paged_query_result_is_read_to_the_end(self):
+        pages = [
+            {"Items": [stored_line("a", 2)], "LastEvaluatedKey": {"orderId": {"S": "order-1"}}},
+            {"Items": [stored_line("b", 3)]},
+        ]
+        self.handler.dynamodb.query.side_effect = lambda **kw: self.queries.append(kw) or pages[len(self.queries) - 1]
+        self.assertEqual(self.run_batch(record("m", event())), {"batchItemFailures": []})
+        self.assertEqual(len(self.queries), 2)
+        self.assertEqual(self.queries[1]["ExclusiveStartKey"], {"orderId": {"S": "order-1"}})
+        self.assertEqual(len(self.puts), 1)
+
+    def test_a_failed_lookup_is_retried_not_recorded(self):
+        self.handler.dynamodb.query.side_effect = RuntimeError("throttled")
+        self.assertEqual(self.failed_ids(self.run_batch(record("m", event()))), ["m"])
+        self.assertEqual(self.puts, [])
+
+    def test_a_forged_message_does_not_stop_genuine_ones_in_the_same_batch(self):
+        genuine = event()
+        forged = event(detail={**genuine["detail"], "orderId": "order-forged"})
+
+        def lookup(**kwargs):
+            if kwargs["ExpressionAttributeValues"][":o"]["S"] == "order-forged":
+                return {"Items": []}
+            return {"Items": list(self.stored)}
+
+        self.handler.dynamodb.query.side_effect = lookup
+        result = self.run_batch(record("good", genuine), record("fake", forged))
+        self.assertEqual(self.failed_ids(result), ["fake"])
+        self.assertEqual([call["Item"]["orderId"]["S"] for call in self.puts], ["order-1"])
 
 
 if __name__ == "__main__":

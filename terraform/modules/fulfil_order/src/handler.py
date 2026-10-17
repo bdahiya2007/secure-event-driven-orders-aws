@@ -17,6 +17,7 @@ _config = Config(
 dynamodb = boto3.client("dynamodb", config=_config)
 
 TABLE_NAME = os.environ["TABLE_NAME"]
+ORDERS_TABLE_NAME = os.environ["ORDERS_TABLE_NAME"]
 
 MAX_ITEMS = 100
 MAX_ID_LENGTH = 64
@@ -54,21 +55,61 @@ def _parse(record):
     if not isinstance(items, list) or not 0 < len(items) <= MAX_ITEMS:
         raise ValidationError(f"items must be a list of 1-{MAX_ITEMS} entries")
 
-    total_quantity = 0
+    lines = {}
     for item in items:
-        quantity = item.get("quantity") if isinstance(item, dict) else None
+        if not isinstance(item, dict):
+            raise ValidationError("Each item must be an object")
+        quantity = item.get("quantity")
         if isinstance(quantity, bool) or not isinstance(quantity, int) or not 0 < quantity <= MAX_QUANTITY:
             raise ValidationError("Each item needs an integer quantity")
-        total_quantity += quantity
+        item_id = _identifier(item.get("itemId"), "itemId")
+        if item_id in lines:
+            raise ValidationError("Duplicate itemId")
+        lines[item_id] = quantity
 
     return {
         "orderId": _identifier(detail.get("orderId"), "orderId"),
         "customerId": _identifier(detail.get("customerId"), "customerId"),
         "eventId": _identifier(event.get("id"), "id"),
         "orderCreatedAt": _identifier(detail.get("createdAt"), "createdAt"),
-        "itemCount": len(items),
-        "totalQuantity": total_quantity,
+        "lines": lines,
+        "itemCount": len(lines),
+        "totalQuantity": sum(lines.values()),
     }
+
+
+def _stored_order(order_id):
+    """Read the order as saved by CreateOrder: its lines and the customer IDs on them."""
+    lines, customers = {}, set()
+    request = {
+        "TableName": ORDERS_TABLE_NAME,
+        "KeyConditionExpression": "orderId = :o",
+        "ExpressionAttributeValues": {":o": {"S": order_id}},
+        "ProjectionExpression": "#i, #q, #c",
+        "ExpressionAttributeNames": {"#i": "itemId", "#q": "quantity", "#c": "customerId"},
+        # The event is published after the save commits, so a consistent read always sees it.
+        "ConsistentRead": True,
+    }
+    while True:
+        page = dynamodb.query(**request)
+        for item in page["Items"]:
+            lines[item["itemId"]["S"]] = int(item["quantity"]["N"])
+            customers.add(item["customerId"]["S"])
+        if "LastEvaluatedKey" not in page:
+            return lines, customers
+        request["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+
+
+def _verify_order(order):
+    """Accept the event only if it describes an order that really exists.
+
+    Anyone who can put an event on the bus or a message on the queue can make it look well formed, so
+    the event is checked against the stored order: same customer, same lines, same quantities.
+    A forged, altered or unknown order fails here and ends up in the dead-letter queue.
+    """
+    lines, customers = _stored_order(order["orderId"])
+    if lines != order["lines"] or customers != {order["customerId"]}:
+        raise ValidationError("Event does not match a stored order")
 
 
 def _fulfil(order):
@@ -98,7 +139,9 @@ def lambda_handler(event, context):
 
     for record in event["Records"]:
         try:
-            _fulfil(_parse(record))
+            order = _parse(record)
+            _verify_order(order)
+            _fulfil(order)
         except Exception:
             # Log the message id only, never the body. After maxReceiveCount
             # attempts SQS moves the message to the dead-letter queue.
