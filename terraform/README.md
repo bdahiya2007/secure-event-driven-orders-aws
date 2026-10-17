@@ -173,6 +173,15 @@ aws sqs get-queue-attributes --queue-url "$(terraform output -raw fulfilment_dlq
   --attribute-names ApproximateNumberOfMessages
 ```
 
+## Event authenticity
+
+Two controls stop a forged `OrderCreated` event from creating a fulfilment (threats T5 and T6 in the [threat model](../docs/THREAT_MODEL.md)):
+
+- **Bus policy** (`modules/eventbridge`, input `publisher_role_arns`): an explicit `Deny` on `events:PutEvents` for every principal except the `CreateOrder` role. It binds administrators too, so test events must go through the application.
+- **Order check** (`FulfilOrder`): each event is compared with the stored order, read with a consistent `Query` on the Orders table. The customer, the item IDs and the quantities must all match, otherwise the message fails, is retried and dead-lettered.
+
+The check needs `dynamodb:Query` on the Orders table. That permission has to be in the Lambda role **and** in the permissions boundary, which lives in `bootstrap`. When rolling this out, apply `terraform/bootstrap` **before** the pipeline deploys the role change; otherwise the boundary blocks the new permission and every message fails and ends up in the dead-letter queue until the boundary is updated.
+
 ## Order notifications
 
 The `order-created-to-notification-<env>` rule matches the same `OrderCreated` events and publishes a short message (`Order <orderId> was created at <createdAt>.`) to the `order-notifications-<env>` SNS topic. It carries no customer data. Only that rule can publish to the topic, and only over TLS. Set `notification_email` to subscribe an address, then click the confirmation link AWS sends. Additional subscribers (SQS, Lambda, HTTPS) can be attached to the topic later without changing the rule.

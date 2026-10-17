@@ -61,6 +61,9 @@ Read them with the CLI, fix the cause, then redrive them to the source queue (SQ
 ### Why a visibility timeout of 180 seconds and a concurrency cap of 5?
 The function timeout is 30 seconds and the queue's visibility timeout is 6 times that, as AWS recommends, so a message is not redelivered while still being processed. Capping concurrency at 5 stops a burst of orders from running many Lambdas and flooding DynamoDB.
 
+### Why can I not put a test event on the bus myself?
+The bus policy denies `events:PutEvents` to every principal except the `CreateOrder` role, administrators included. Rules match only on `source` and `detail-type`, which any caller of `PutEvents` can set, so without the policy anyone with that permission could forge an `OrderCreated` event. To test, invoke `CreateOrder`. As a second layer, `FulfilOrder` rejects any event that does not match a stored order, so even a message sent straight to the queue cannot create a fulfilment.
+
 ### Why is a repeated message not a problem?
 The `Fulfilments` write has `attribute_not_exists(orderId)`. A second delivery fails that condition, is logged as already fulfilled, and counts as success, so no duplicate record and no retry loop.
 

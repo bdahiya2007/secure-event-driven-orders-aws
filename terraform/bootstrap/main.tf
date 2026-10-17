@@ -56,6 +56,12 @@ data "aws_iam_policy_document" "boundary" {
   }
 
   statement {
+    sid       = "ReadOrdersForFulfilmentChecks"
+    actions   = ["dynamodb:Query"]
+    resources = [local.table_arns[0]]
+  }
+
+  statement {
     sid       = "ConsumeFulfilmentQueue"
     actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
     resources = [local.queue_arn]

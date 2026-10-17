@@ -77,8 +77,8 @@ Rating is the residual risk after the listed controls: **Low**, **Medium** or **
 | T2 | Tampering | Hostile or unexpected fields in an order body | Allow-list of `customerId`, `itemId`, `quantity` with type and length limits; unknown fields dropped; 256 KB body limit | Low | None |
 | T3 | Tampering | A client sets its own `orderId` or `createdAt` | Both are generated server-side and cannot be overridden | Low | None |
 | T4 | Tampering | An order line overwrites another | Single transaction with `attribute_not_exists(orderId)`; a duplicate rejects the whole order | Low | None |
-| T5 | Spoofing | A forged `OrderCreated` event is put on the bus by another principal in the account | `FulfilOrder` re-validates the schema. The rules match only on `source` and `detail-type`, which any `events:PutEvents` caller can set | Medium | The bus has no resource policy, and `FulfilOrder` does not check that the order exists in `Orders`, so a well-formed fake creates a fulfilment record and sends a notification |
-| T6 | Tampering | A message is sent straight to the queue | Messages are re-validated; invalid ones fail, are retried and dead-lettered, and the alarm fires. This was tested on 2026-10-17 | Medium | A well-formed forged message is accepted, same root cause as T5 |
+| T5 | Spoofing | A forged `OrderCreated` event is put on the bus by another principal in the account | The bus policy denies `events:PutEvents` to every principal except the `CreateOrder` role, administrators included. `FulfilOrder` also checks each event against the stored order (same customer, same lines, same quantities) before recording anything | Low | An attacker would need to take over the `CreateOrder` role, or change the bus policy and write matching rows into `Orders`. Both are outside what a plain `PutEvents` permission allows |
+| T6 | Tampering | A message is sent straight to the queue | Messages are re-validated, then checked against the stored order; invalid, forged or altered ones fail, are retried and dead-lettered, and the alarm fires. Invalid input was tested live on 2026-10-17 | Low | A principal with `sqs:SendMessage` can still add noise to the queue; it costs retries and a dead-letter alarm, not a false fulfilment |
 | T7 | Repudiation | Nobody can say who created an order | Order and message IDs are logged | Medium | No caller identity is stored. Whether CloudTrail covers these services is not verified by this project |
 | T8 | Information disclosure | Order data leaks through notifications | The notification carries only `orderId` and a timestamp | Low | The SNS topics are not KMS-encrypted |
 | T9 | Information disclosure | Order data at rest or in transit | DynamoDB encryption at rest (AWS-managed key), SQS-managed encryption, TLS-only policies on queues and topics | Low | No customer-managed key; no field-level protection of `customerId` |
@@ -104,11 +104,12 @@ Rating is the residual risk after the listed controls: **Low**, **Medium** or **
 
 ## Residual risk summary
 
+Closed since the first version of this model: T5 and T6 (forged events), by the bus policy and the order check.
+
 1. **T1, T11: no protection at the edge.** Acceptable while there is no public endpoint. They become the first work item once an API Gateway is added: an authorizer, request validation and throttling.
-2. **T5, T6: events can be forged by a trusted principal.** Add an event-bus resource policy limiting who may publish, and have `FulfilOrder` confirm the order exists before recording a fulfilment.
-3. **T14: saved but not published.** Move event publication to DynamoDB Streams with EventBridge Pipes.
-4. **T16: environment not bound to a branch.** Needs a public repository or a paid GitHub plan to restrict deployments to `main` and require approval for `prod`.
-5. **T22: public CI logs.** Hide the full plan and mask the account ID before making the repository public.
+2. **T14: saved but not published.** Move event publication to DynamoDB Streams with EventBridge Pipes.
+3. **T16: environment not bound to a branch.** Needs a public repository or a paid GitHub plan to restrict deployments to `main` and require approval for `prod`.
+4. **T22: public CI logs.** Hide the full plan and mask the account ID before making the repository public.
 
 ## Keeping it current
 

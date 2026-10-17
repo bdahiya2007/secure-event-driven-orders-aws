@@ -18,6 +18,16 @@ variable "table_arn" {
   type        = string
 }
 
+variable "orders_table_name" {
+  description = "Orders table the event is checked against"
+  type        = string
+}
+
+variable "orders_table_arn" {
+  description = "ARN of the Orders table (scopes the Query permission)"
+  type        = string
+}
+
 variable "timeout" {
   description = "Function timeout in seconds; the queue visibility timeout must be at least 6x this"
   type        = number
