@@ -151,6 +151,8 @@ what reports it.
 
 ## Security design
 
+The full analysis, with each threat, its control and what is still open, is in the [threat model](docs/THREAT_MODEL.md).
+
 | Area | What is in place |
 |---|---|
 | **Input handling** | `CreateOrder` stores only `customerId`, `itemId` and `quantity`, with type and length checks (IDs up to 64 characters, quantity 1 to 1000, up to 100 lines, body up to 256 KB). Unknown fields are dropped, so a caller cannot store arbitrary data or override the server-set `orderId` and `createdAt`. No price field is accepted. `FulfilOrder` re-validates every message instead of trusting the event. |
@@ -190,6 +192,7 @@ There is no VPC, NAT gateway or provisioned capacity. See the [FAQ](docs/FAQ.md#
 ├── .checkov.yaml              # reviewed checkov exceptions, each with a reason
 ├── .githooks/pre-commit       # runs the secret scan before every commit
 ├── docs/
+│   ├── THREAT_MODEL.md        # STRIDE threat model, controls and residual risks
 │   ├── FAQ.md                 # design, behaviour, operations and CI/CD questions
 │   └── SECRET_SCANNING.md     # what the scanner blocks and how to use it
 ├── scripts/                   # secret-scan.py, install-hooks.sh
