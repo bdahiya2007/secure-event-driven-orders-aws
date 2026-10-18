@@ -25,9 +25,11 @@ resource "aws_dynamodb_table" "this" {
     kms_key_arn = var.kms_key_arn
   }
 
-  # A global table: replicas in other regions. Replication needs a stream with both old and new images.
-  stream_enabled   = length(var.replica_regions) > 0
-  stream_view_type = length(var.replica_regions) > 0 ? "NEW_AND_OLD_IMAGES" : null
+  # Replication needs a stream with both old and new images. It stays on even with no replicas: DynamoDB refuses to
+  # disable a stream in the same update that removes a replica ("Disabling Stream is not allowed for a Global Table
+  # replica"), so switching multi-region off would fail if the stream followed the replicas. An unread stream is free.
+  stream_enabled   = true
+  stream_view_type = "NEW_AND_OLD_IMAGES"
 
   dynamic "replica" {
     for_each = toset(var.replica_regions)
