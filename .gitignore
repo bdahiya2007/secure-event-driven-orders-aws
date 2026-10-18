@@ -59,3 +59,6 @@ TODO.md
 
 # Personal permission-set policy (copy of another project's statements); keep local only
 terraform/iam/combined-permission-set-policy.json
+
+# Local runbook for making a repository public; keep it out of the repository
+RUNBOOK_PUBLIC_RELEASE.md
