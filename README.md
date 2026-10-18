@@ -187,7 +187,8 @@ Residual risks from the [threat model](docs/THREAT_MODEL.md), highest first. Eac
 | **T1** | Medium | The API accepts AWS-signed requests only; there is no end-user identity, so it is not safe to expose to browsers or customers | A Cognito or JWT authorizer |
 | **T7** | Medium | The caller's identity is not stored with an order, API access logging is off (it needs an account-wide API Gateway logging role), and CloudTrail coverage is unverified | Record the caller, add API access logs, confirm CloudTrail |
 | **T16** | Medium | The `dev` and `prod` environments are not tied to a branch and have no approval gate, because a private repository on the free GitHub plan cannot use either | Make the repository public or upgrade, then restrict to protected branches and require approval for `prod` |
-| **T22** | Medium | The full plan and apply output in the Actions log prints ARNs and the account ID | Hide the plan output and mask the account ID before the repository is made public |
+| T22 | Low | The account ID is now masked in the Actions logs (verified), but resource names, queue names and API IDs are still visible in the plan output | Review a plan before the first public release |
+| T27 | Low | The commit history shows the author's personal email (also public in the companion repository) and an unlinked placeholder noreply address on 19 commits | Kept deliberately; turn on GitHub's email privacy settings |
 | T25 | Low | The deploy role can manage REST APIs in the account, not only this project's, because API IDs are not known in advance | Tag-based access control |
 | T11 | Low | The stage is throttled and the consumer capped, but there is no per-caller quota, reserved concurrency or budget alarm | A usage plan, a reserved concurrency limit, an AWS Budget alert |
 | T14 | Low | A message that fails three times leaves the order saved but unannounced, in the intake dead-letter queue, until redriven | Redrive tooling (untried) |
