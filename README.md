@@ -16,7 +16,7 @@ alarms and a dashboard make the failure paths visible.
 
 **State:** deployed and verified end to end in `dev`: a signed order is accepted with `202`, saved by `CreateOrder`, fulfilled, announced by email
 and charted, and the failure paths (dead-letter queue and alarm) were triggered on purpose. `prod` is defined from the same modules and has not
-been applied.
+been applied. The repository is public.
 
 ## Architecture
 
@@ -172,6 +172,7 @@ To report a vulnerability, see the [security policy](SECURITY.md).
 | **Event authenticity** | The bus policy denies `events:PutEvents` to everyone except the `CreateOrder` role, and `FulfilOrder` checks every event against the stored order (same customer, lines and quantities) before recording a fulfilment, so a forged or altered event cannot create one. |
 | **Pipeline identity** | GitHub OIDC with short-lived tokens. The trust policy pins the repository by immutable owner and repository ID and accepts only jobs running in the `dev` or `prod` GitHub environment. No AWS keys are stored anywhere. |
 | **Pipeline cannot elevate itself** | The deploy role and boundary live in a separately applied `terraform/bootstrap` stack. The role can only create or modify the two Lambda roles, only with the boundary attached, and explicit denies stop it editing itself or removing the boundary. |
+| **Repository rules** | The repository is public. `main` accepts changes only through a pull request with five passing checks (tests, `bandit`, `checkov`, secret scan, Terraform validate), up to date with `main`, administrators included, with no force pushes or deletions. The `dev` and `prod` environments accept only protected branches, and `prod` needs the owner's approval. Secret scanning with push protection, Dependabot alerts and private vulnerability reporting are on, the Actions token is read-only, and merged branches are deleted automatically. |
 | **No surprise deletions** | The deploy workflow stops if the plan would delete or replace anything, because a replaced table loses its data. A manual override exists. |
 | **State** | Private, versioned, encrypted S3 bucket with TLS-only access and native locking, one key per environment. State and variable files are never committed. |
 | **Data protection** | DynamoDB encryption at rest, point-in-time recovery, and deletion protection in prod. |
@@ -187,7 +188,6 @@ Residual risks from the [threat model](docs/THREAT_MODEL.md), highest first. Eac
 |---|---|---|---|
 | **T1** | Medium | The API accepts AWS-signed requests only; there is no end-user identity, so it is not safe to expose to browsers or customers | A Cognito or JWT authorizer |
 | **T7** | Medium | The caller's identity is not stored with an order, API access logging is off (it needs an account-wide API Gateway logging role), and CloudTrail coverage is unverified | Record the caller, add API access logs, confirm CloudTrail |
-| **T16** | Medium | The `dev` and `prod` environments are not tied to a branch and have no approval gate, because a private repository on the free GitHub plan cannot use either | Make the repository public or upgrade, then restrict to protected branches and require approval for `prod` |
 | T22 | Low | The account ID is now masked in the Actions logs (verified), but resource names, queue names and API IDs are still visible in the plan output | Review a plan before the first public release |
 | T27 | Low | The commit history shows the author's personal email (also public in the companion repository) and an unlinked placeholder noreply address on 19 commits | Kept deliberately; turn on GitHub's email privacy settings |
 | T25 | Low | The deploy role can manage REST APIs in the account, not only this project's, because API IDs are not known in advance | Tag-based access control |
@@ -326,7 +326,6 @@ More questions and answers are in the [FAQ](docs/FAQ.md).
 | **No idempotency key on create** | A client retry creates a second order | Accept and store a client-supplied key |
 | **SNS topics and table keys** | Topics are unencrypted (EventBridge and CloudWatch need a customer-managed key); tables use the AWS-managed key | A customer-managed KMS key |
 | **No event replay** | An event with no matching rule, or a consumer added later, cannot see past events | An EventBridge archive |
-| **Repository protection** | No branch protection or `prod` approval gate: the repository is private on the free GitHub plan, which does not offer them | Make the repository public (after hiding the plan from the Actions log and masking the account ID) or upgrade |
 | **No `pip-audit` yet** | Nothing to audit until the Lambdas have a pinned requirements file | Add it with the first third-party dependency |
 
 **Built but not applied:** the `prod` environment. **Tried and working in `dev`:** the signed order API, retries and both dead-letter alarms, and the forged-event controls. **Not tried:** redriving from a dead-letter queue and a throttle burst.
