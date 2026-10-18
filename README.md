@@ -15,7 +15,7 @@ consumes to record the fulfilment in its own table, the other publishes a short 
 alarms and a dashboard make the failure paths visible.
 
 **State:** deployed and verified end to end in `dev`: a signed order is accepted with `202`, saved by `CreateOrder`, fulfilled, announced by email
-and charted, and the failure paths (dead-letter queue and alarm) were triggered on purpose. `prod` is defined from the same modules and has not
+and charted, the failure paths (dead-letter queue and alarm) were triggered on purpose, and idempotent processing was checked with repeated and simultaneous deliveries of one message, which create one order. `prod` is defined from the same modules and has not
 been applied. The repository is public.
 
 ## Architecture
