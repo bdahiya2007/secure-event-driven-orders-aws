@@ -295,7 +295,7 @@ setup, variables and the dashboard are in the [Terraform reference](terraform/RE
 | `deploy.yml` | Push to `main` (documentation-only changes skipped), or manual | Checks, `init`, `validate`, `plan`, a no-delete guard, then `apply` of exactly that plan |
 
 `deploy.yml` assumes the deploy role through GitHub OIDC and needs four repository secrets: `AWS_DEPLOY_ROLE_ARN`, `TF_STATE_BUCKET`,
-`NOTIFICATION_EMAIL` and `ALERT_EMAIL`. Lambda packaging is part of Terraform: `archive_file` zips each handler during the plan and the
+`NOTIFICATION_EMAIL` and `ALERT_EMAIL`. The pinned actions are kept current by a weekly grouped Dependabot pull request (`.github/dependabot.yml`), which runs the same checks. Lambda packaging is part of Terraform: `archive_file` zips each handler during the plan and the
 apply updates a function when its code hash changes, so there is no separate `update-function-code` step. Setup of the role and the
 safeguards are described in the [Terraform reference](terraform/README.md#cicd-github-actions).
 
