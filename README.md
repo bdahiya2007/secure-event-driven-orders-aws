@@ -334,3 +334,8 @@ More questions and answers are in the [FAQ](docs/FAQ.md).
 [secure-serverless-api-aws](https://github.com/bdahiya2007/secure-serverless-api-aws) is a companion project (an authenticated REST API with a
 direct DynamoDB integration) that uses the same OIDC pipeline pattern and shares this project's state bucket. [three-tier-web-app-aws](https://github.com/bdahiya2007/three-tier-web-app-aws)
 applies the same approach with CloudFormation.
+
+## License
+
+All rights reserved. This repository is a portfolio project, published for viewing. No license is granted to copy, modify or redistribute
+the code. You are welcome to read it and to fork it on GitHub.
