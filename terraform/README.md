@@ -242,7 +242,7 @@ The switch `enable_multi_region` (default `false`, in both environments) adds a 
 3. Confirm the extra SNS subscription emails (notifications and alerts in the secondary Region).
 4. Test: `terraform output order_api_url_secondary` gives the secondary API. Sign requests for the secondary Region (`aws:amz:us-west-2:execute-api`).
 5. Rehearse a failover by inverting the Route 53 health check from the `global_endpoint_health_check_id` output (`aws route53 update-health-check --health-check-id <id> --inverted`, and `--no-inverted` to fail back). Setting the alarm's state does not work, because Route 53 reads the metric. See the [FAQ](../docs/FAQ.md#multi-region).
-6. **Before any change that triggers a pipeline deploy, switch it off:** `terraform apply -var enable_multi_region=false` (or run without the variable). The pipeline plans with it off and would delete the secondary stack, so its no-delete guard stops the run.
+6. **Before any change that triggers a pipeline deploy, switch it off:** `terraform apply -var enable_multi_region=false` (or run without the variable). While the secondary stack exists, the pipeline cannot work: its role has no permissions in the secondary Region (or on the replicated tables), so the plan fails while reading those resources, before anything is changed. After switching off, re-run the failed deploy (`gh run rerun <run id> --failed`); it should end with no changes.
 
 **Costs:** the second Region is idle until used. Added: replicated DynamoDB writes (each write is billed in both Regions) and one Route 53 health check, about $0.50 a month.
 
