@@ -1,6 +1,6 @@
 # Secret scanning
 
-Nothing secret, confidential or personal may be committed, because this repository may be public. One scanner,
+Nothing secret, confidential or personal may be committed, because this repository is public. One scanner,
 [scripts/secret-scan.py](../scripts/secret-scan.py), enforces that in three places so the rules cannot drift apart. It is the same scanner
 used in `secure-serverless-api-aws`.
 

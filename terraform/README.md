@@ -115,7 +115,7 @@ Optionally `SECRET_SCAN_LITERALS` (values the secret scan must block). Set them 
 
 ### One-time setup of the deploy role
 
-1. Create the GitHub repository (empty, private recommended) and, in it, turn on immutable subject claims, then read the subject prefix:
+1. Create the GitHub repository (empty) and, in it, turn on immutable subject claims, then read the subject prefix:
    ```bash
    gh api -X PUT repos/<owner>/<repo>/actions/oidc/customization/sub -F use_default=true -F use_immutable_subject=true
    gh api repos/<owner>/<repo>/actions/oidc/customization/sub --jq .sub_claim_prefix
@@ -134,9 +134,15 @@ Optionally `SECRET_SCAN_LITERALS` (values the secret scan must block). Set them 
 
 The environments attach the boundary to both Lambda execution roles, so the bootstrap must be applied before any environment apply. The deploy role can only create or modify roles named `CreateOrder-*` and `FulfilOrder-*`, only with that boundary attached, and cannot remove the boundary or change itself.
 
+**Repository rules (public repository).** The repository is public, and these settings are applied through GitHub, not through Terraform:
+- `main` accepts changes only through a pull request with five passing checks, up to date with `main`, administrators included, no force pushes or deletions.
+- `dev` and `prod` accept only protected branches, and `prod` needs the owner's approval. Without that, a workflow on any branch could assume the role.
+- Secret scanning with push protection, Dependabot alerts and private vulnerability reporting are on; the Actions token is read-only and cannot approve pull requests; first-time contributors need approval to run workflows; actions must be pinned to a full commit SHA; merged branches are deleted automatically.
+- Dependabot opens a weekly grouped pull request to update the pinned actions.
+
 **Security notes**
 - The role's permissions are limited to the project's own resources: tables `Orders-*` and `Fulfilments-*`, the `orders-*` bus and rules, the `order-fulfilment-*` queues, the two SNS topics, the two functions and their log groups, `order-fulfilment-*` alarms, `orders-*` dashboards and this project's state keys. If a new resource type is added, the policy in `bootstrap/main.tf` needs a matching statement, applied manually.
-- The email addresses are marked `sensitive`, so Terraform hides them in plan output. The plan log still shows other resource details such as ARNs, so prefer a private repository.
+- The email addresses are marked `sensitive`, so Terraform hides them in plan output. The account ID is masked in the log (a workflow step registers it as a mask), but resource names, queue names and API IDs are visible. They are not secrets and were reviewed before the repository became public.
 - Actions are pinned to full commit SHAs. `deploy.yml` runs only on pushes to `main` and manual runs, never on pull requests, and `validate.yml` uses no AWS credentials.
 
 ## DynamoDB module
