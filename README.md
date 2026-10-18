@@ -157,6 +157,7 @@ what reports it.
 ## Security design
 
 The full analysis, with each threat, its control and what is still open, is in the [threat model](docs/THREAT_MODEL.md).
+To report a vulnerability, see the [security policy](SECURITY.md).
 
 | Area | What is in place |
 |---|---|
@@ -221,6 +222,7 @@ There is no VPC, NAT gateway or provisioned capacity. See the [FAQ](docs/FAQ.md#
 ```
 .
 ├── .github/workflows/         # validate.yml (pull requests), deploy.yml (push to main)
+├── SECURITY.md                # how to report a vulnerability
 ├── .checkov.yaml              # reviewed checkov exceptions, each with a reason
 ├── .githooks/pre-commit       # runs the secret scan before every commit
 ├── docs/
