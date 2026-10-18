@@ -87,6 +87,7 @@ aws route53 update-health-check --health-check-id "$HC" --no-inverted
 | Health check inverted at 06:37:41 UTC | Events processed in `us-west-2` by 06:45:21 (within 7 min 40 s). That Region's rule matched the event, its SNS topic published, its `FulfilOrder` wrote the record, and the record was readable from `us-east-1` |
 | Health check restored at 06:45:18 | An order 3 seconds later still went to `us-west-2`; one 97 seconds later went to `us-east-1` |
 | Afterwards | Dead-letter queues empty, all alarms `OK`, no Terraform drift |
+| Switching the whole option off (`enable_multi_region=false`) | First attempt failed: DynamoDB refused to disable the table streams while a replica existed. After keeping the streams on, the apply removed the secondary stack, the replicas and the health check; `terraform plan` showed no changes and the next pipeline deploy passed |
 
 **Mistakes made, so you do not repeat them:** the first rehearsal forced the alarm to `ALARM` and placed 14 orders that all stayed in the primary, because the health check follows the metric. The second script waited for the status text to say "Failure", which never appears under inversion, so it placed no orders during the window; the failover was seen only in the order placed after restoring.
 
@@ -106,7 +107,7 @@ aws route53 update-health-check --health-check-id "$HC" --no-inverted
 | **Messages stuck in a failed Region's queues** | Accepted orders wait until the Region returns | Accept it, or add a cross-Region intake path |
 | **No real outage has been tested** | The observed times come from an inverted health check, not a failure | A game day |
 | **Replication is last-writer-wins** | Conditional writes are atomic per Region only | Keep order IDs unique per request, as now |
-| **The pipeline cannot run while the secondary exists** | Terraform changes need the switch turned off first | A pipeline role and job for the second Region |
+| **The pipeline cannot run while the secondary exists** | Terraform changes need the switch turned off first (verified: switching off works and the pipeline passes afterwards) | A pipeline role and job for the second Region |
 | **A pinned third-party library** | `awscrt` is the one third-party package in a Lambda | Upgrade it deliberately; Dependabot does not watch it |
 | **`prod` not applied** | The same code, never run there | Apply and rehearse before depending on it |
 
