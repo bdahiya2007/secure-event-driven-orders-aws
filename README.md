@@ -15,7 +15,7 @@ consumes to record the fulfilment in its own table, the other publishes a short 
 alarms and a dashboard make the failure paths visible.
 
 **State:** deployed and verified end to end in `dev`: a signed order is accepted with `202`, saved by `CreateOrder`, fulfilled, announced by email
-and charted, the failure paths (dead-letter queue and alarm) were triggered on purpose, and idempotent processing was checked with repeated and simultaneous deliveries of one message, which create one order. The optional multi-region deployment is built and tested offline; it is applied from a workstation and has not been verified live yet. `prod` is defined from the same modules and has not
+and charted, the failure paths (dead-letter queue and alarm) were triggered on purpose, and idempotent processing was checked with repeated and simultaneous deliveries of one message, which create one order. The optional multi-region deployment is applied from a workstation and was verified live: both Regions took orders, events went through the global endpoint, a rehearsed failover routed them to the secondary Region, and fail-back returned them to the primary. `prod` is defined from the same modules and has not
 been applied. The repository is public.
 
 ## Architecture
@@ -178,7 +178,7 @@ flowchart LR
 
 - **What is active-active:** both Regions accept orders at the same time, each through its own API, queue and `CreateOrder`, writing to the same global tables.
 - **What is not:** a global endpoint is **active-passive for event routing**. Events go to the primary bus while Route 53 considers the primary healthy, and to the secondary bus after a failover, so fulfilment and notifications run in one Region at a time. Event replication is off, so the secondary rules never process the same event a second time.
-- **Failover:** a CloudWatch alarm on EventBridge's ingestion latency feeds a Route 53 health check. Setting the alarm to `ALARM` rehearses a failover; setting it back to `OK` fails back. Events in flight in the primary when it fails are not copied to the secondary.
+- **Failover:** a Route 53 health check follows EventBridge's ingestion-latency metric, and the global endpoint follows the health check. Inverting the health check rehearses a failover and restoring it fails back; in `dev`, events were routed to the secondary within 7 minutes 40 seconds and back to the primary within 97 seconds. Events in flight in the primary when it fails are not copied to the secondary.
 - **Cost and operation:** the second copy is idle until used. The extra costs are the replicated writes and a Route 53 health check of about $0.50 a month. It is applied from a workstation, not the pipeline. Setup, failover rehearsal and the limits are in the [Terraform reference](terraform/README.md#multi-region-optional) and the [FAQ](docs/FAQ.md#multi-region).
 
 ## What this demonstrates

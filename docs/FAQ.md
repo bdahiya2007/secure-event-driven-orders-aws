@@ -92,10 +92,22 @@ With `enable_multi_region` on, a second copy of the application runs in the seco
 Partly. Orders are accepted in both Regions at the same time, each through its own API and `CreateOrder`. A global endpoint, though, routes events to the **primary** bus while Route 53 considers the primary healthy, and to the **secondary** bus after a failover. So the event side (rules, fulfilment, notifications) is active in one Region at a time. Calling the whole thing active-active would overstate it.
 
 ### How does the failover work?
-A CloudWatch alarm watches EventBridge's `IngestionToInvocationStartLatency` (above 30 seconds on average for five minutes). A Route 53 health check follows that alarm, and the global endpoint follows the health check. When the primary looks unhealthy, new events go to the secondary bus and are processed by the secondary rules, queue and `FulfilOrder`. When the alarm clears, events go back to the primary.
+A CloudWatch alarm is defined on EventBridge's `IngestionToInvocationStartLatency` (above 30 seconds on average for five minutes), and a Route 53 health check of type "CloudWatch alarm" follows it. Route 53 reads the **metric data** the alarm watches and applies the threshold itself; it does **not** read the alarm's state. The global endpoint follows the health check. When the primary looks unhealthy, new events go to the secondary bus and are processed by the secondary rules, queue and `FulfilOrder`. When it recovers, events go back to the primary.
 
 ### How can I rehearse a failover?
-Set the endpoint's alarm to `ALARM` (its name is in the `global_endpoint_failover_alarm` output): `aws cloudwatch set-alarm-state --alarm-name <name> --state-value ALARM --state-reason "failover rehearsal"`. Allow a few minutes for Route 53 and the endpoint to react, place orders through either API, and watch the fulfilment records and notification arrive from the secondary Region. Set the alarm back to `OK` to fail back. The alarm re-evaluates itself every minute, so it also returns to its real state on its own.
+Invert the health check, which makes Route 53 report the primary unhealthy without touching any metric. The `global_endpoint_health_check_id` output gives its ID:
+
+```bash
+aws route53 update-health-check --health-check-id <id> --inverted      # rehearse the failure
+aws route53 update-health-check --health-check-id <id> --no-inverted   # fail back
+```
+
+Place orders and see where they are processed: the `FulfilOrder-dev` log group in `us-east-1` or `FulfilOrder-uswest2-dev` in `us-west-2`, or the `MatchedEvents` metric of the notification rule in each Region. Two things to know:
+- **Setting the alarm to `ALARM` does nothing.** It was tried first, and the health check stayed healthy because Route 53 follows the metric, not the state.
+- **The health check status text ignores the inversion.** `get-health-check-status` keeps printing the raw metric check ("Success: ..."), so watch where the events land instead. Terraform shows the health check as changed while it is inverted, so always set it back.
+
+### How long does a failover take, and how long does fail-back take?
+Observed in `dev` on 2026-10-18, with upper bounds because the probes were sparse: after the health check was inverted at 06:37:41 UTC, new events were routed to the secondary by 06:45:21, within 7 minutes 40 seconds. After it was restored at 06:45:18, an order placed 3 seconds later was still processed in the secondary, and one placed 97 seconds after the restore was processed in the primary again, so fail-back completed within 97 seconds. Expect several minutes, not seconds, to fail over; a precise measurement would need frequent probe orders, each of which sends a notification email.
 
 ### Why is event replication off?
 With replication on, the endpoint copies every event to the secondary bus, where the secondary rules would process it as well: two fulfilment runs and two emails per order. With replication off, an event goes to one bus. The cost is that events already in the primary when it fails are not available in the secondary.

@@ -64,8 +64,13 @@ output "global_endpoint_id" {
   value       = local.endpoint_id
 }
 
+output "global_endpoint_health_check_id" {
+  description = "Route 53 health check behind the endpoint's failover. Rehearse a failover with: aws route53 update-health-check --health-check-id <id> --inverted ; fail back with --no-inverted (multi-region only)"
+  value       = one(module.global_endpoint[*].health_check_id)
+}
+
 output "global_endpoint_failover_alarm" {
-  description = "Set this alarm to ALARM to rehearse a failover to the secondary Region, and to OK to fail back (multi-region only)"
+  description = "The alarm the health check follows; its metric, not its state, drives the failover (multi-region only)"
   value       = one(module.global_endpoint[*].alarm_name)
 }
 
