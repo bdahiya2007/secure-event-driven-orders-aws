@@ -58,3 +58,26 @@ output "intake_queue_url" {
 output "intake_dlq_url" {
   value = module.intake_queue.dlq_url
 }
+
+output "global_endpoint_id" {
+  description = "EndpointId used to publish events (multi-region only)"
+  value       = local.endpoint_id
+}
+
+output "global_endpoint_failover_alarm" {
+  description = "Set this alarm to ALARM to rehearse a failover to the secondary Region, and to OK to fail back (multi-region only)"
+  value       = one(module.global_endpoint[*].alarm_name)
+}
+
+output "order_api_url_secondary" {
+  description = "POST <url> with a SigV4-signed request, signing for the secondary Region (multi-region only)"
+  value       = var.enable_multi_region ? "${module.order_api_secondary[0].invoke_url}/orders" : null
+}
+
+output "intake_dlq_url_secondary" {
+  value = var.enable_multi_region ? module.intake_queue_secondary[0].dlq_url : null
+}
+
+output "fulfilment_dlq_url_secondary" {
+  value = var.enable_multi_region ? module.fulfilment_queue_secondary[0].dlq_url : null
+}

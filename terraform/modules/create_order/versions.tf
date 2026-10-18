@@ -6,5 +6,8 @@ terraform {
     archive = {
       source = "hashicorp/archive"
     }
+    external = {
+      source = "hashicorp/external"
+    }
   }
 }

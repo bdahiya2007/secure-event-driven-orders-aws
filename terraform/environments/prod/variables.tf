@@ -28,3 +28,20 @@ variable "notification_email" {
   sensitive   = true
   default     = ""
 }
+
+variable "enable_multi_region" {
+  description = "Run a second copy of the application in secondary_region (API, queues, Lambda functions, event bus, SNS topics), make the three tables global tables, and publish events through an EventBridge global endpoint. Billed items: replicated writes and a Route 53 health check. Applied from a workstation, not by the pipeline."
+  type        = bool
+  default     = false
+}
+
+variable "secondary_region" {
+  description = "The secondary Region used when enable_multi_region is on"
+  type        = string
+  default     = "us-west-2"
+
+  validation {
+    condition     = var.secondary_region != var.aws_region
+    error_message = "secondary_region must differ from aws_region."
+  }
+}

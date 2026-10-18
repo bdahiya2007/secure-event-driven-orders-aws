@@ -48,3 +48,9 @@ variable "app_role_prefixes" {
   type        = list(string)
   default     = ["CreateOrder-", "FulfilOrder-"]
 }
+
+variable "secondary_region" {
+  description = "Secondary Region of the multi-region deployment. The permissions boundary allows the application roles to work in it; the deploy role is not extended, because the second Region is applied from a workstation."
+  type        = string
+  default     = "us-west-2"
+}

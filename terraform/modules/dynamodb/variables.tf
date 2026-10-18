@@ -43,3 +43,9 @@ variable "ttl_attribute" {
   type        = string
   default     = null
 }
+
+variable "replica_regions" {
+  description = "Regions that get a replica of this table, making it a global table; empty keeps it in one region"
+  type        = list(string)
+  default     = []
+}
