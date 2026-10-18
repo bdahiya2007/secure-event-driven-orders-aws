@@ -246,7 +246,7 @@ Residual risks from the [threat model](docs/THREAT_MODEL.md), highest first. Eac
 | T22 | Low | The account ID is now masked in the Actions logs (verified), but resource names, queue names and API IDs are still visible in the plan output | Reviewed before the repository became public; the names are not secrets |
 | T27 | Low | The commit history shows the author's personal email (also public in the companion repository) and an unlinked placeholder noreply address on 19 commits | Kept deliberately; turn on GitHub's email privacy settings |
 | T31 | Low | With multi-region on, events in flight in the primary at a failover are not replicated, replicas lag by about a second, and conditional writes are atomic within a Region only | Enable replication with the secondary rules paused, or accept the window |
-| T34 | Low | The pipeline cannot run while the multi-region stack exists, because it plans with the switch off | A pipeline role and job for the second Region |
+| T34 | Low | The pipeline cannot run while the multi-region stack exists, because it plans with the switch off (switching off is verified in `dev`) | A pipeline role and job for the second Region |
 | T25 | Low | The deploy role can manage REST APIs in the account, not only this project's, because API IDs are not known in advance | Tag-based access control |
 | T11 | Low | The stage is throttled and the consumer capped, but there is no per-caller quota, reserved concurrency or budget alarm | A usage plan, a reserved concurrency limit, an AWS Budget alert |
 | T14 | Low | A message that fails three times leaves the order saved but unannounced, in the intake dead-letter queue, until redriven | Redrive tooling (untried) |
@@ -395,13 +395,13 @@ More questions and answers are in the [FAQ](docs/FAQ.md).
 | **No event replay** | An event with no matching rule, or a consumer added later, cannot see past events | An EventBridge archive |
 | **No `pip-audit` yet** | Nothing to audit until the Lambdas have a pinned requirements file | Add it with the first third-party dependency |
 
-**Tried and working in `dev`:** the signed order API, three attempts then the dead-letter queue and the alarm on both the intake and the fulfilment queue, the forged-event controls, and a multi-region failover and fail-back ([DISASTER_RECOVERY.md](docs/DISASTER_RECOVERY.md)). **Not tried:** redriving from a dead-letter queue, a throttle burst, a forced publish failure, and a real Region outage.
+**Tried and working in `dev`:** the signed order API, three attempts then the dead-letter queue and the alarm on both the intake and the fulfilment queue, the forged-event controls, a multi-region failover and fail-back, and switching multi-region back off ([DISASTER_RECOVERY.md](docs/DISASTER_RECOVERY.md)). **Not tried:** redriving from a dead-letter queue, a throttle burst, a forced publish failure, and a real Region outage.
 
 ### Built, but switched off
 
 | Feature | State |
 |---|---|
-| **Multi-region** (`enable_multi_region`) | Off by default in both environments. When on it adds a second Region's API, queues, functions and rules, global tables and an EventBridge global endpoint with a Route 53 health check. Applied from a workstation, rehearsed live in `dev` (failover and fail-back), and costs the replicated writes plus about $0.50 a month for the health check. While the secondary stack exists the pipeline cannot run, so switch it off first. See [DISASTER_RECOVERY.md](docs/DISASTER_RECOVERY.md). |
+| **Multi-region** (`enable_multi_region`) | Off by default in both environments. When on it adds a second Region's API, queues, functions and rules, global tables and an EventBridge global endpoint with a Route 53 health check. Applied from a workstation, rehearsed live in `dev` (failover and fail-back), and costs the replicated writes plus about $0.50 a month for the health check. While the secondary stack exists the pipeline cannot run, so switch it off first (verified in `dev`; the tables keep their streams so the switch-off works). See [DISASTER_RECOVERY.md](docs/DISASTER_RECOVERY.md). |
 | **`awscrt` packaging** | Only built when the multi-region switch is on, because signing for a global endpoint needs it and the Lambda runtime lacks it. With the switch off, the `CreateOrder` package is the handler alone. |
 | **The `prod` environment** | Written and validated by the pipeline's offline checks, but never applied. Nothing in this README has been demonstrated there. |
 

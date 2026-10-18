@@ -128,7 +128,10 @@ With replication on, the endpoint copies every event to the secondary bus, where
 Signing a request to a global endpoint uses SigV4A, which botocore only does with the `awscrt` library, and the Lambda runtime does not include it. `scripts/vendor_awscrt.py` downloads one pinned wheel, checks its SHA-256 and puts it, with the handler, into the `CreateOrder` package. It uses only the Python standard library, so no `pip` is needed. With the switch off the package is the handler alone, as before.
 
 ### Why do I need to turn the switch off before the pipeline runs?
-The pipeline plans with the switch off and its role has no permissions in the secondary Region. While the secondary stack exists, Terraform has to read it, so the plan fails with access-denied errors on the `us-west-2` queues, topics, event bus, replicated tables and the alarm, before anything is changed or destroyed. (Were it able to read them, the plan would delete the stack, and the no-delete guard would stop that.) Turn the switch off from your workstation, which removes the secondary stack, before merging a change that triggers a deploy; if a deploy has already failed this way, re-run it afterwards with `gh run rerun <run id> --failed`.
+The pipeline plans with the switch off and its role has no permissions in the secondary Region. While the secondary stack exists, Terraform has to read it, so the plan fails with access-denied errors on the `us-west-2` queues, topics, event bus, replicated tables and the alarm, before anything is changed or destroyed. (Were it able to read them, the plan would delete the stack, and the no-delete guard would stop that.) Turn the switch off from your workstation, which removes the secondary stack, before merging a change that triggers a deploy; if a deploy has already failed this way, re-run it afterwards with `gh run rerun <run id> --failed` (unless a newer deploy has already passed).
+
+### What happens when I switch it off?
+`terraform apply -var enable_multi_region=false` removes the secondary stack (about 54 resources), the table replicas and the Route 53 health check, and leaves the primary Region as it was. The tables keep their DynamoDB streams: the first attempt failed with `Disabling Stream is not allowed for a Global Table replica` because the stream was being turned off in the same update that removed the replica, so the streams now stay on. After the fix the apply completed in `dev`, `terraform plan` showed no changes, and no health check or secondary API remained. Orders written in the secondary Region before the switch-off were already replicated to the primary tables, so they remain; anything still in the secondary queues is deleted with them.
 
 ### What is not included?
 DNS routing for the API (a custom domain with Route 53 latency or failover routing); clients pick an API URL themselves. Replication of events. A dashboard for the secondary Region. A pipeline role for the second Region.
@@ -196,6 +199,9 @@ One item per order line: `orderId` is the partition key and `itemId` the sort ke
 
 ### Why on-demand capacity?
 There is nothing to size, nothing is billed when idle, and the traffic is small and unpredictable. At steady millions of requests a day, provisioned capacity with autoscaling could be cheaper.
+
+### Why do the tables have a stream when multi-region is off?
+A table that is part of a global table needs a stream with old and new images, and DynamoDB will not let you disable it while a replica exists, nor in the same update that removes the replica. Keeping the stream on all the time makes switching multi-region on and off safe in either direction. Nothing reads the stream in single-Region mode, and an unread stream has no charge.
 
 ### Which encryption key do the tables use?
 The AWS-managed `aws/dynamodb` key. A customer-managed key can be set through the module's `kms_key_arn` input; it is not used yet.
