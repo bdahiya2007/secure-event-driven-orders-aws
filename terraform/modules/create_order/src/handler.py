@@ -26,6 +26,10 @@ serializer = TypeSerializer()
 EVENT_BUS_NAME = os.environ["EVENT_BUS_NAME"]
 TABLE_NAME = os.environ["TABLE_NAME"]
 PROCESSING_TABLE_NAME = os.environ["PROCESSING_TABLE_NAME"]
+# When set, events go through this EventBridge global endpoint (routed to the primary bus, or to the secondary bus
+# if the primary is unhealthy) instead of straight to the regional bus. Signing such a request (SigV4A) needs the
+# awscrt library, which the Lambda runtime does not include; the multi-region build vendors it into the package.
+EVENT_ENDPOINT_ID = os.environ.get("EVENT_ENDPOINT_ID") or None
 
 MAX_ITEMS = 100  # DynamoDB transaction limit
 MAX_ID_LENGTH = 64
@@ -236,8 +240,8 @@ def _confirm_already_saved(order):
 
 
 def _publish(order):
-    result = events.put_events(
-        Entries=[
+    request = {
+        "Entries": [
             {
                 "EventBusName": EVENT_BUS_NAME,
                 "Source": "orders.create-order",
@@ -245,7 +249,14 @@ def _publish(order):
                 "Detail": json.dumps(order),
             }
         ]
-    )
+    }
+    if EVENT_ENDPOINT_ID:
+        try:
+            import awscrt  # noqa: F401  (required by botocore to sign global-endpoint requests)
+        except ImportError:
+            raise RuntimeError("EVENT_ENDPOINT_ID is set but the awscrt library is not packaged with the function")
+        request["EndpointId"] = EVENT_ENDPOINT_ID
+    result = events.put_events(**request)
     if result["FailedEntryCount"] > 0:
         entry = result["Entries"][0]
         raise RuntimeError(f"PutEvents failed: {entry.get('ErrorCode')} {entry.get('ErrorMessage')}")

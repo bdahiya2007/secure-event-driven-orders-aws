@@ -15,7 +15,7 @@ consumes to record the fulfilment in its own table, the other publishes a short 
 alarms and a dashboard make the failure paths visible.
 
 **State:** deployed and verified end to end in `dev`: a signed order is accepted with `202`, saved by `CreateOrder`, fulfilled, announced by email
-and charted, the failure paths (dead-letter queue and alarm) were triggered on purpose, and idempotent processing was checked with repeated and simultaneous deliveries of one message, which create one order. `prod` is defined from the same modules and has not
+and charted, the failure paths (dead-letter queue and alarm) were triggered on purpose, and idempotent processing was checked with repeated and simultaneous deliveries of one message, which create one order. The optional multi-region deployment is built and tested offline; it is applied from a workstation and has not been verified live yet. `prod` is defined from the same modules and has not
 been applied. The repository is public.
 
 ## Architecture
@@ -142,10 +142,50 @@ sequenceDiagram
     end
 ```
 
+## Multi-region (optional)
+
+A switch, `enable_multi_region` (off by default), runs a second copy of the application in a secondary Region (`us-west-2`) and sends events through an EventBridge **global endpoint**. Each Region has its own API Gateway, intake and fulfilment queues, `CreateOrder` and `FulfilOrder` Lambda functions, event bus and SNS topics. The three DynamoDB tables become global tables, so both Regions read and write the same data.
+
+```mermaid
+flowchart LR
+    client([Clients])
+    subgraph r1 [Primary Region]
+        api1["API Gateway"] --> q1[["Intake queue"]] --> fn1["CreateOrder"]
+        bus1{{"Event bus: orders"}}
+        down1["Rules, fulfilment queue,<br/>FulfilOrder, SNS"]
+        bus1 --> down1
+    end
+    subgraph r2 [Secondary Region]
+        api2["API Gateway"] --> q2[["Intake queue"]] --> fn2["CreateOrder"]
+        bus2{{"Event bus: orders"}}
+        down2["Rules, fulfilment queue,<br/>FulfilOrder, SNS"]
+        bus2 --> down2
+    end
+    ep{{"Global endpoint"}}
+    hc["Route 53 health check<br/>(alarm on ingestion latency)"]
+    tables[("Global tables:<br/>Orders, Fulfilments, Orders-processing")]
+
+    client --> api1
+    client --> api2
+    fn1 -- "PutEvents (EndpointId)" --> ep
+    fn2 -- "PutEvents (EndpointId)" --> ep
+    ep -- "primary healthy" --> bus1
+    ep -. "primary unhealthy" .-> bus2
+    hc --> ep
+    fn1 <--> tables
+    fn2 <--> tables
+```
+
+- **What is active-active:** both Regions accept orders at the same time, each through its own API, queue and `CreateOrder`, writing to the same global tables.
+- **What is not:** a global endpoint is **active-passive for event routing**. Events go to the primary bus while Route 53 considers the primary healthy, and to the secondary bus after a failover, so fulfilment and notifications run in one Region at a time. Event replication is off, so the secondary rules never process the same event a second time.
+- **Failover:** a CloudWatch alarm on EventBridge's ingestion latency feeds a Route 53 health check. Setting the alarm to `ALARM` rehearses a failover; setting it back to `OK` fails back. Events in flight in the primary when it fails are not copied to the secondary.
+- **Cost and operation:** the second copy is idle until used. The extra costs are the replicated writes and a Route 53 health check of about $0.50 a month. It is applied from a workstation, not the pipeline. Setup, failover rehearsal and the limits are in the [Terraform reference](terraform/README.md#multi-region-optional) and the [FAQ](docs/FAQ.md#multi-region).
+
 ## What this demonstrates
 
 - **Asynchronous intake:** the API validates and queues, answers `202` straight away, and a consumer saves and publishes; the whole path retries safely, so a saved order is never left unannounced.
 - **Event-driven design with clear failure semantics:** save first, publish second, fan out through EventBridge, buffer with SQS, retry with partial-batch failure reporting, dead-letter after three failed receives.
+- **Multi-region resilience (optional):** a second Region, global tables and an EventBridge global endpoint with Route 53 failover, behind a switch, with the limits stated.
 - **Idempotent processing:** `CreateOrder` claims each `orderId` with a conditional write and a lease, records the result, and answers a repeat with the stored result without saving or publishing again; concurrent copies cannot both proceed. `FulfilOrder` is idempotent in the same spirit.
 - **Infrastructure as code, modular:** nine reusable Terraform modules shared by two environments, with remote locked state.
 - **Security by default:** least-privilege IAM per function, a permissions boundary on every role the pipeline creates, allow-listed input, TLS-only and source-scoped queue and topic policies, no stored credentials.
@@ -179,6 +219,7 @@ To report a vulnerability, see the [security policy](SECURITY.md).
 | **Intake queue** | Only the API's role may send to it (an explicit deny covers everyone else, administrators included); it is encrypted, TLS-only and dead-lettered after three failed receives, with its own alarm. API Gateway's role can do nothing but `SendMessage` on that queue. |
 | **Input handling** | `CreateOrder` validates every message again against an allow-list (IDs up to 64 characters, quantity 1 to 1000, up to 100 lines, unique item IDs, a lowercase UUID `orderId`) and drops unknown fields, so nothing on the queue can store arbitrary data. No price field is accepted. `FulfilOrder` re-validates every message instead of trusting the event. |
 | **Idempotent processing** | Each `orderId` has one record in a processing table. `CreateOrder` claims it with a conditional write (a lease), so two copies of a message cannot both proceed. A completed order returns its stored result without saving or publishing again, an expired lease is taken over by the next retry, and an `orderId` reused for different content is rejected (the record keeps a fingerprint of the order). Records expire after a week. |
+| **Multi-region controls** | The permissions boundary covers the secondary Region, so roles created there stay inside it. Both event buses allow `PutEvents` only to the two `CreateOrder` roles, which are the only principals allowed to use the global endpoint. The one third-party library the multi-region build needs (`awscrt`, for request signing) is pinned to an exact version, downloaded by a script that checks its SHA-256 before unpacking, and packaged only into `CreateOrder`. |
 | **No overwrites, no half orders** | Order lines are written in one transaction with a condition expression, so a duplicate `itemId` rejects the whole order. |
 | **Least-privilege IAM** | `CreateOrder` can write its own logs, `PutItem` on the Orders table and `PutEvents` on the one bus. `FulfilOrder` can write its own logs, read and delete from the one queue, and `PutItem` on the Fulfilments table. No `*` actions or resources. |
 | **Permissions boundary** | Both Lambda roles carry `orders-pipeline-app-role-boundary`, a ceiling that caps them at exactly those actions, even if a role policy were widened later. |
@@ -204,6 +245,8 @@ Residual risks from the [threat model](docs/THREAT_MODEL.md), highest first. Eac
 | **T7** | Medium | The caller's identity is not stored with an order, API access logging is off (it needs an account-wide API Gateway logging role), and CloudTrail coverage is unverified | Record the caller, add API access logs, confirm CloudTrail |
 | T22 | Low | The account ID is now masked in the Actions logs (verified), but resource names, queue names and API IDs are still visible in the plan output | Reviewed before the repository became public; the names are not secrets |
 | T27 | Low | The commit history shows the author's personal email (also public in the companion repository) and an unlinked placeholder noreply address on 19 commits | Kept deliberately; turn on GitHub's email privacy settings |
+| T31 | Low | With multi-region on, events in flight in the primary at a failover are not replicated, replicas lag by about a second, and conditional writes are atomic within a Region only | Enable replication with the secondary rules paused, or accept the window |
+| T34 | Low | The pipeline cannot run while the multi-region stack exists, because it plans with the switch off | A pipeline role and job for the second Region |
 | T25 | Low | The deploy role can manage REST APIs in the account, not only this project's, because API IDs are not known in advance | Tag-based access control |
 | T11 | Low | The stage is throttled and the consumer capped, but there is no per-caller quota, reserved concurrency or budget alarm | A usage plan, a reserved concurrency limit, an AWS Budget alert |
 | T14 | Low | A message that fails three times leaves the order saved but unannounced, in the intake dead-letter queue, until redriven | Redrive tooling (untried) |
@@ -227,6 +270,7 @@ pay-per-use and nothing runs when there is no traffic. Figures are us-east-1 lis
 | DynamoDB (two on-demand tables) | About $0.625 per million writes and $0.125 per million reads |
 | EventBridge custom events | $1.00 per million |
 | SNS email delivery | First 1,000 free, then about $2 per 100,000 (the largest per-order cost) |
+| Multi-region switch on (optional) | The second Region is idle until used. Added: replicated DynamoDB writes (each write is billed in both Regions) and one Route 53 health check, about $0.50 a month |
 | About 100,000 orders a month | Roughly $1 to $3 in total |
 
 There is no VPC, NAT gateway or provisioned capacity. See the [FAQ](docs/FAQ.md#cost) for what could add cost.
@@ -245,7 +289,7 @@ There is no VPC, NAT gateway or provisioned capacity. See the [FAQ](docs/FAQ.md#
 │   ├── THREAT_MODEL.md        # STRIDE threat model, controls and residual risks
 │   ├── FAQ.md                 # design, behaviour, operations and CI/CD questions
 │   └── SECRET_SCANNING.md     # what the scanner blocks and how to use it
-├── scripts/                   # secret-scan.py, install-hooks.sh
+├── scripts/                   # secret-scan.py, install-hooks.sh, vendor_awscrt.py (multi-region build)
 ├── tests/                     # Lambda unit tests (standard library only)
 └── terraform/
     ├── README.md              # modules, variables, remote state, CI/CD, dashboard
@@ -260,6 +304,7 @@ There is no VPC, NAT gateway or provisioned capacity. See the [FAQ](docs/FAQ.md#
     │   ├── event_queue/       # SQS queue (intake and fulfilment), dead-letter queue, policies, alarm
     │   ├── event_rule/        # EventBridge rule to a target
     │   ├── eventbridge/       # custom event bus
+    │   ├── global_endpoint/   # EventBridge global endpoint, health check and failover alarm
     │   ├── fulfil_order/      # FulfilOrder Lambda, IAM role, SQS trigger
     │   └── notification_topic/# SNS topic for order notifications
     └── environments/
@@ -321,6 +366,9 @@ safeguards are described in the [Terraform reference](terraform/README.md#cicd-g
 - **Queue first, then process.** API Gateway writes straight to SQS with no Lambda in the request path, so the caller is never held up by DynamoDB or EventBridge, and a burst piles up in the queue instead of failing. The cost is that `202` means accepted, not created.
 - **Save first, publish second, and retry the pair.** A failed save never produces an event for an order that does not exist. If the publish fails after a successful save, the message returns to the queue; the retry finds the order already stored, confirms it is the same order, and publishes again, so a saved order is not left unannounced.
 - **Idempotent by lease, not by luck.** Reading "has this order been processed?" and then acting would let two copies race, so the check and the claim are one conditional write. The holder gets a lease; a crashed holder's lease runs out and the next retry takes over. The result is recorded only by the lease holder, and a record that is `COMPLETED` is never overwritten. Publishing an event cannot be made exactly once (the event can go out and the result still fail to be written), so that one window can repeat an event; the consumers tolerate it.
+- **A global endpoint, with replication off.** Replication would copy every event to the secondary bus, where the secondary rules would process it again (duplicate fulfilment work and emails). With it off, events go to one bus at a time. The price: events in flight in the primary when it fails are not available in the secondary.
+- **Global tables for the data.** `FulfilOrder` checks each event against the order table and `CreateOrder` keeps its idempotency records in a table, so both Regions must see the same data. Replication is eventual and last-writer-wins, so conditional writes are atomic within a Region only; a check that runs before an order has replicated simply fails and is retried.
+- **Off by default, applied by hand.** Like your other multi-region work: the pipeline applies one Region with the switch off, and the secondary is applied from a workstation. This keeps the pipeline's permissions unchanged.
 - **The request ID is the order ID.** API Gateway's request ID (a UUID) is the `orderId`, so the caller has it immediately and every retry of one message refers to the same order. A client that retries the whole request still creates a second order (no idempotency key yet).
 - **AWS IAM signing for the API.** It needs no extra service and keeps the endpoint closed to anyone without credentials. It suits service-to-service callers; an end-user flow would add Cognito or another authorizer.
 - **EventBridge, then SQS.** The bus lets consumers be added without touching `CreateOrder` (the notification rule was added that way). The queue absorbs bursts, retries failures and keeps unprocessable messages in a dead-letter queue.
@@ -341,6 +389,7 @@ More questions and answers are in the [FAQ](docs/FAQ.md).
 | **Fulfilment only records `FULFILLED`** | There is no inventory or shipping logic | Real processing in `FulfilOrder` |
 | **A failed order is only visible as an alarm** | The caller gets `202` before the order is saved, so a message that fails three times ends in the intake dead-letter queue and the alarm; the order may be saved but unannounced until it is redriven | Redrive tooling, and an order status the caller can read |
 | **The caller cannot supply an idempotency key** | `orderId` is API Gateway's request ID, so a client that retries the whole HTTP request creates a second order. Redeliveries of one queued message are now fully idempotent | Accept a client-supplied order ID and return the stored result for it |
+| **Multi-region is optional and partly manual** | Events in flight in the primary at a failover are not replicated; replicas lag by about a second, so an order checked in the other Region can fail once and be retried; clients choose an API URL themselves (no DNS routing, which needs a domain); the pipeline must run with the switch off, because its permissions cover one Region only | Route 53 latency or failover routing for the API, and a pipeline role for the second Region |
 | **SNS topics and table keys** | Topics are unencrypted (EventBridge and CloudWatch need a customer-managed key); tables use the AWS-managed key | A customer-managed KMS key |
 | **No event replay** | An event with no matching rule, or a consumer added later, cannot see past events | An EventBridge archive |
 | **No `pip-audit` yet** | Nothing to audit until the Lambdas have a pinned requirements file | Add it with the first third-party dependency |

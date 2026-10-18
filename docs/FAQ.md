@@ -2,7 +2,7 @@
 
 Questions about the design, the behaviour and the operation of this project, grouped by topic, with short answers and where to read more. Everything described here was built and checked in `dev` (one account, one region, one user) unless an answer says otherwise; "not tested" means exactly that.
 
-**Topics:** [Design and flow](#design-and-flow) | [The order API](#the-order-api) | [Idempotency](#idempotency) | [EventBridge](#eventbridge) | [SQS and fulfilment](#sqs-and-fulfilment) | [SNS and notifications](#sns-and-notifications) | [DynamoDB](#dynamodb) | [Lambda and Python](#lambda-and-python) | [Security and permissions](#security-and-permissions) | [Cost](#cost) | [Terraform and state](#terraform-and-state) | [CI/CD](#cicd) | [Operating and testing](#operating-and-testing)
+**Topics:** [Design and flow](#design-and-flow) | [The order API](#the-order-api) | [Idempotency](#idempotency) | [Multi-region](#multi-region) | [EventBridge](#eventbridge) | [SQS and fulfilment](#sqs-and-fulfilment) | [SNS and notifications](#sns-and-notifications) | [DynamoDB](#dynamodb) | [Lambda and Python](#lambda-and-python) | [Security and permissions](#security-and-permissions) | [Cost](#cost) | [Terraform and state](#terraform-and-state) | [CI/CD](#cicd) | [Operating and testing](#operating-and-testing)
 
 ---
 
@@ -82,6 +82,35 @@ The record keeps a fingerprint (a hash) of the customer and the lines. A message
 
 ### How long are the records kept, and why a separate table?
 Seven days, then DynamoDB's time-to-live removes them. That is longer than the four days SQS keeps a message, so a late redelivery is still recognised. The state sits in its own table so the order table keeps one clean item per order line, and so the claim and the result can be rewritten without touching order data. The table is named `Orders-processing-<env>` on purpose: the existing least-privilege patterns (`Orders-*`) already cover it, so the permissions boundary and the deploy role did not need to change.
+
+## Multi-region
+
+### What does the multi-region option build?
+With `enable_multi_region` on, a second copy of the application runs in the secondary Region (`us-west-2`): its own API Gateway, intake and fulfilment queues with their dead-letter queues and alarms, `CreateOrder` and `FulfilOrder` Lambda functions, event bus, rules and SNS topics. `Orders`, `Fulfilments` and `Orders-processing` become DynamoDB global tables with a replica in that Region. Both `CreateOrder` functions publish through an EventBridge **global endpoint** instead of straight to a regional bus.
+
+### Is it really active-active?
+Partly. Orders are accepted in both Regions at the same time, each through its own API and `CreateOrder`. A global endpoint, though, routes events to the **primary** bus while Route 53 considers the primary healthy, and to the **secondary** bus after a failover. So the event side (rules, fulfilment, notifications) is active in one Region at a time. Calling the whole thing active-active would overstate it.
+
+### How does the failover work?
+A CloudWatch alarm watches EventBridge's `IngestionToInvocationStartLatency` (above 30 seconds on average for five minutes). A Route 53 health check follows that alarm, and the global endpoint follows the health check. When the primary looks unhealthy, new events go to the secondary bus and are processed by the secondary rules, queue and `FulfilOrder`. When the alarm clears, events go back to the primary.
+
+### How can I rehearse a failover?
+Set the endpoint's alarm to `ALARM` (its name is in the `global_endpoint_failover_alarm` output): `aws cloudwatch set-alarm-state --alarm-name <name> --state-value ALARM --state-reason "failover rehearsal"`. Allow a few minutes for Route 53 and the endpoint to react, place orders through either API, and watch the fulfilment records and notification arrive from the secondary Region. Set the alarm back to `OK` to fail back. The alarm re-evaluates itself every minute, so it also returns to its real state on its own.
+
+### Why is event replication off?
+With replication on, the endpoint copies every event to the secondary bus, where the secondary rules would process it as well: two fulfilment runs and two emails per order. With replication off, an event goes to one bus. The cost is that events already in the primary when it fails are not available in the secondary.
+
+### Why global tables, and what are their limits?
+`FulfilOrder` checks each event against the order table and `CreateOrder` keeps its idempotency records in a table, so whichever Region handles an event must see the data. Global tables replicate in about a second, last writer wins, and a conditional write is atomic only within its own Region. In practice an order checked just after it was created in the other Region can fail once, and the retry (180 seconds later) succeeds. An `orderId` is unique per request, so the same order is never written in both Regions at once.
+
+### Why does the multi-region build package a third-party library?
+Signing a request to a global endpoint uses SigV4A, which botocore only does with the `awscrt` library, and the Lambda runtime does not include it. `scripts/vendor_awscrt.py` downloads one pinned wheel, checks its SHA-256 and puts it, with the handler, into the `CreateOrder` package. It uses only the Python standard library, so no `pip` is needed. With the switch off the package is the handler alone, as before.
+
+### Why do I need to turn the switch off before the pipeline runs?
+The pipeline plans with the switch off and has no permissions in the secondary Region. While the secondary stack exists, that plan would delete it, so the no-delete guard stops the run. Turn the switch off from your workstation (which removes the secondary stack) before merging a change that triggers a deploy, or leave the pipeline until you do.
+
+### What is not included?
+DNS routing for the API (a custom domain with Route 53 latency or failover routing); clients pick an API URL themselves. Replication of events. A dashboard for the secondary Region. A pipeline role for the second Region.
 
 ## EventBridge
 

@@ -1,6 +1,20 @@
+# Publishing through an EventBridge global endpoint needs the awscrt library (SigV4A signing). When it is needed,
+# scripts/vendor_awscrt.py assembles the handler plus a pinned, hash-checked awscrt into a folder, and that folder is
+# zipped; otherwise the package is the handler alone, with no third-party code.
+data "external" "package" {
+  count   = var.vendor_awscrt ? 1 : 0
+  program = ["python3", "${path.module}/../../../scripts/vendor_awscrt.py"]
+
+  query = {
+    handler = abspath("${path.module}/src/handler.py")
+    out     = abspath("${path.module}/build/package")
+  }
+}
+
 data "archive_file" "this" {
   type        = "zip"
-  source_file = "${path.module}/src/handler.py"
+  source_file = var.vendor_awscrt ? null : "${path.module}/src/handler.py"
+  source_dir  = var.vendor_awscrt ? data.external.package[0].result.dir : null
   output_path = "${path.module}/build/create_order.zip"
 }
 
@@ -36,9 +50,10 @@ data "aws_iam_policy_document" "permissions" {
     resources = ["${aws_cloudwatch_log_group.this.arn}:*"]
   }
 
+  # The regional bus, plus (for a multi-region deployment) the global endpoint and the other region's bus.
   statement {
     actions   = ["events:PutEvents"]
-    resources = [var.event_bus_arn]
+    resources = concat([var.event_bus_arn], var.publish_resource_arns)
   }
 
   statement {
@@ -76,11 +91,14 @@ resource "aws_lambda_function" "this" {
   memory_size      = 128
 
   environment {
-    variables = {
-      EVENT_BUS_NAME        = var.event_bus_name
-      TABLE_NAME            = var.table_name
-      PROCESSING_TABLE_NAME = var.processing_table_name
-    }
+    variables = merge(
+      {
+        EVENT_BUS_NAME        = var.event_bus_name
+        TABLE_NAME            = var.table_name
+        PROCESSING_TABLE_NAME = var.processing_table_name
+      },
+      var.event_endpoint_id == null ? {} : { EVENT_ENDPOINT_ID = var.event_endpoint_id },
+    )
   }
 
   depends_on = [aws_cloudwatch_log_group.this, aws_iam_role_policy.this]

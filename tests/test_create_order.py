@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 import unittest
 from unittest import mock
 
@@ -283,6 +285,35 @@ class CreateOrderTests(unittest.TestCase):
         self.handler.events.put_events.side_effect = publish_then_lose_the_lease
         self.assertEqual(self.run_batch(record("m", message())), {"batchItemFailures": []})
         self.assertEqual(self.processing_record()["status"]["S"], "IN_PROGRESS")  # left for the new owner to finish
+
+    # --- global endpoint: events go through the endpoint when one is configured ---
+
+    def test_without_an_endpoint_the_event_goes_to_the_regional_bus(self):
+        self.run_batch(record("m", message()))
+        request = self.published[0]
+        self.assertNotIn("EndpointId", request)
+        self.assertEqual(request["Entries"][0]["EventBusName"], "orders-test")
+
+    def test_with_an_endpoint_the_event_is_published_through_it(self):
+        self.handler.EVENT_ENDPOINT_ID = "abc123.xyz"
+        with mock.patch.dict(sys.modules, {"awscrt": types.ModuleType("awscrt")}):
+            self.assertEqual(self.run_batch(record("m", message())), {"batchItemFailures": []})
+        request = self.published[0]
+        self.assertEqual(request["EndpointId"], "abc123.xyz")
+        self.assertEqual(request["Entries"][0]["EventBusName"], "orders-test")  # the bus name, not an ARN
+        self.assertEqual(request["Entries"][0]["DetailType"], "OrderCreated")
+
+    def test_an_endpoint_without_the_signing_library_fails_loudly_and_publishes_nothing(self):
+        self.handler.EVENT_ENDPOINT_ID = "abc123.xyz"
+        with mock.patch.dict(sys.modules, {"awscrt": None}):  # importing it raises ImportError
+            self.assertEqual(self.failed_ids(self.run_batch(record("m", message()))), ["m"])
+        self.assertEqual(self.published, [])
+        self.assertEqual(self.processing_record()["status"]["S"], "IN_PROGRESS")  # retried, never marked done
+
+    def test_the_endpoint_id_is_read_from_the_environment(self):
+        with_endpoint = load_handler(HANDLER, "create_order_with_endpoint", {**ENV, "EVENT_ENDPOINT_ID": "e1.x"})
+        self.assertEqual(with_endpoint.EVENT_ENDPOINT_ID, "e1.x")
+        self.assertIsNone(load_handler(HANDLER, "create_order_without_endpoint", {**ENV, "EVENT_ENDPOINT_ID": ""}).EVENT_ENDPOINT_ID)
 
     # --- failures: a failed step is retried without losing or doubling the order ---
 

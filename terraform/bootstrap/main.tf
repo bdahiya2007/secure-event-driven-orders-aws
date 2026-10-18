@@ -34,6 +34,31 @@ locals {
     "arn:aws:apigateway:${local.region}::/restapis/*",
     "arn:aws:apigateway:${local.region}::/tags/*",
   ]
+  # The boundary also covers the secondary Region (multi-region), so the application roles created there stay inside it.
+  # The deploy role's own permissions above are NOT extended: the second Region is applied from a workstation.
+  boundary_regions = [local.region, var.secondary_region]
+  boundary_log_groups = flatten([
+    for r in local.boundary_regions : [for p in var.app_role_prefixes : "arn:aws:logs:${r}:${local.account_id}:log-group:/aws/lambda/${p}*:*"]
+  ])
+  boundary_bus_arns = concat(
+    [for r in local.boundary_regions : "arn:aws:events:${r}:${local.account_id}:event-bus/orders-*"],
+    ["arn:aws:events:${local.region}:${local.account_id}:endpoint/orders-*"], # the global endpoint lives in the primary Region
+  )
+  boundary_table_arns = flatten([
+    for r in local.boundary_regions : [
+      "arn:aws:dynamodb:${r}:${local.account_id}:table/Orders-*",
+      "arn:aws:dynamodb:${r}:${local.account_id}:table/Fulfilments-*",
+    ]
+  ])
+  boundary_orders_table_arns = [for r in local.boundary_regions : "arn:aws:dynamodb:${r}:${local.account_id}:table/Orders-*"]
+  boundary_intake_queue_arns = [for r in local.boundary_regions : "arn:aws:sqs:${r}:${local.account_id}:order-intake-*"]
+  boundary_queue_arns = flatten([
+    for r in local.boundary_regions : [
+      "arn:aws:sqs:${r}:${local.account_id}:order-fulfilment-*",
+      "arn:aws:sqs:${r}:${local.account_id}:order-intake-*",
+    ]
+  ])
+
   topic_arns = [
     "arn:aws:sns:${local.region}:${local.account_id}:order-notifications-*",
     "arn:aws:sns:${local.region}:${local.account_id}:orders-alerts-*",
@@ -49,38 +74,38 @@ data "aws_iam_policy_document" "boundary" {
   statement {
     sid       = "LambdaLogs"
     actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
-    resources = [for g in local.log_groups : "${g}:*"]
+    resources = local.boundary_log_groups
   }
 
   statement {
     sid       = "PublishOrderEvents"
     actions   = ["events:PutEvents"]
-    resources = [local.bus_arn]
+    resources = local.boundary_bus_arns
   }
 
   statement {
     sid       = "WriteOrderTables"
     actions   = ["dynamodb:PutItem"]
-    resources = local.table_arns
+    resources = local.boundary_table_arns
   }
 
   statement {
     sid       = "ReadOrdersForFulfilmentChecks"
     actions   = ["dynamodb:Query"]
-    resources = [local.table_arns[0]]
+    resources = local.boundary_orders_table_arns
   }
 
   # The API's role sends accepted orders to the intake queue.
   statement {
     sid       = "SendOrdersToIntakeQueue"
     actions   = ["sqs:SendMessage"]
-    resources = [local.intake_queue_arn]
+    resources = local.boundary_intake_queue_arns
   }
 
   statement {
     sid       = "ConsumeFulfilmentQueue"
     actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
-    resources = local.queue_arns
+    resources = local.boundary_queue_arns
   }
 }
 

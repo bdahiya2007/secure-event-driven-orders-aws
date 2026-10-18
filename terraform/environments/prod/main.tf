@@ -1,6 +1,8 @@
 data "aws_caller_identity" "current" {}
 
 locals {
+  replica_regions   = var.enable_multi_region ? [var.secondary_region] : []
+  endpoint_id       = one(module.global_endpoint[*].endpoint_id) # null when multi-region is off
   intake_queue_name = "order-intake-${var.environment}"
 
   # Created by terraform/bootstrap, which must be applied first. Every application role carries it,
@@ -15,6 +17,7 @@ module "orders_table" {
   hash_key            = "orderId"
   range_key           = "itemId"
   deletion_protection = true
+  replica_regions     = local.replica_regions
 }
 
 module "event_bus" {
@@ -23,7 +26,7 @@ module "event_bus" {
   bus_name = "orders-${var.environment}"
 
   # Only CreateOrder may publish; see the bus policy in the module.
-  publisher_role_arns = [module.create_order.role_arn]
+  publisher_role_arns = concat([module.create_order.role_arn], module.create_order_secondary[*].role_arn)
 }
 
 # Orders arrive here from API Gateway and are processed by CreateOrder.
@@ -60,6 +63,11 @@ module "create_order" {
   processing_table_name = module.processing_table.table_name
   processing_table_arn  = module.processing_table.table_arn
 
+  # With multi-region on, events go through the global endpoint (which needs the signing library packaged).
+  event_endpoint_id     = local.endpoint_id
+  publish_resource_arns = var.enable_multi_region ? [module.global_endpoint[0].endpoint_arn, module.event_bus_secondary[0].bus_arn] : []
+  vendor_awscrt         = var.enable_multi_region
+
   permissions_boundary_arn = local.permissions_boundary_arn
 }
 
@@ -72,6 +80,7 @@ module "processing_table" {
   hash_key            = "orderId"
   ttl_attribute       = "expiresAt"
   deletion_protection = true
+  replica_regions     = local.replica_regions
 }
 
 module "fulfilments_table" {
@@ -80,6 +89,7 @@ module "fulfilments_table" {
   table_name          = "Fulfilments-${var.environment}"
   hash_key            = "orderId"
   deletion_protection = true
+  replica_regions     = local.replica_regions
 }
 
 module "order_created_rule" {

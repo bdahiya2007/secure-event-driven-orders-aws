@@ -25,6 +25,19 @@ resource "aws_dynamodb_table" "this" {
     kms_key_arn = var.kms_key_arn
   }
 
+  # A global table: replicas in other regions. Replication needs a stream with both old and new images.
+  stream_enabled   = length(var.replica_regions) > 0
+  stream_view_type = length(var.replica_regions) > 0 ? "NEW_AND_OLD_IMAGES" : null
+
+  dynamic "replica" {
+    for_each = toset(var.replica_regions)
+
+    content {
+      region_name            = replica.value
+      point_in_time_recovery = var.enable_point_in_time_recovery
+    }
+  }
+
   # Expire rows by a timestamp attribute (used for idempotency records, which are only needed for a while).
   dynamic "ttl" {
     for_each = var.ttl_attribute == null ? [] : [var.ttl_attribute]

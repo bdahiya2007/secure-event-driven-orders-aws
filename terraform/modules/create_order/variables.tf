@@ -73,3 +73,21 @@ variable "permissions_boundary_arn" {
   type        = string
   default     = null
 }
+
+variable "event_endpoint_id" {
+  description = "EventBridge global endpoint ID; when set, events are published through it instead of straight to the regional bus"
+  type        = string
+  default     = null
+}
+
+variable "publish_resource_arns" {
+  description = "Extra ARNs the role may PutEvents to: the global endpoint and the other region's bus"
+  type        = list(string)
+  default     = []
+}
+
+variable "vendor_awscrt" {
+  description = "Package the pinned awscrt library with the function (needed to sign requests to a global endpoint)"
+  type        = bool
+  default     = false
+}

@@ -9,6 +9,7 @@ terraform/
 ├── modules/
 │   ├── dynamodb/            # orders table (on-demand, SSE, PITR, deletion protection)
 │   ├── eventbridge/         # custom event bus
+│   ├── global_endpoint/     # EventBridge global endpoint, failover health check and alarm (multi-region)
 │   ├── order_api/           # REST API: schema validation, SQS integration, throttling, IAM auth
 │   ├── notification_topic/  # SNS topic for order notifications, EventBridge-only publish policy
 │   ├── dashboard/           # CloudWatch dashboard (MatchedEvents, NumberOfMessagesSent, NumberOfMessagesPublished)
@@ -22,7 +23,7 @@ terraform/
     └── prod/
 ```
 
-Each environment folder contains `main.tf`, `variables.tf`, `versions.tf`, `backend.tf` (S3 state) and `outputs.tf`. Each environment has its own state, so `dev` and `prod` never affect each other.
+Each environment folder contains `main.tf`, `secondary.tf` (the optional second Region), `variables.tf`, `versions.tf`, `backend.tf` (S3 state) and `outputs.tf`. Each environment has its own state, so `dev` and `prod` never affect each other.
 
 ## Requirements
 
@@ -224,6 +225,28 @@ Until step 3 completes there is a short window where `CreateOrder` is triggered 
 | `expiresAt` | Seven days after the last write; DynamoDB then deletes the record |
 
 The claim is one `PutItem` with a condition (no record, or an expired lease for the same fingerprint), so concurrent copies cannot both win. The result is recorded with a condition too: only the holder of the lease may write it, and a `COMPLETED` record is never overwritten. The Lambda role may only `PutItem` and `Query` this table. No bootstrap change was needed, because the name starts with `Orders-` and the boundary and the deploy role already cover `Orders-*`.
+
+## Multi-region (optional)
+
+The switch `enable_multi_region` (default `false`, in both environments) adds a secondary Region (`secondary_region`, default `us-west-2`). With it on:
+
+- **A second copy** of the application in the secondary Region (`secondary.tf`): API Gateway, intake and fulfilment queues with dead-letter queues and alarms, `CreateOrder-<region>-<env>` and `FulfilOrder-<region>-<env>` Lambda functions, the `orders-<env>` event bus (it must have the same name as the primary), the rules, and the notification and alerts SNS topics. IAM role names are global, so the secondary roles carry the Region in their names.
+- **Global tables:** `Orders`, `Fulfilments` and `Orders-processing` get a replica in the secondary Region (`replica_regions` in the DynamoDB module, with DynamoDB Streams on).
+- **A global endpoint** (`modules/global_endpoint`): an EventBridge endpoint over the two buses with failover routing driven by a Route 53 health check on a CloudWatch alarm (`IngestionToInvocationStartLatency` above 30 seconds for five minutes). Event replication is disabled. `CreateOrder` in both Regions publishes with `PutEvents(EndpointId=...)`.
+- **The signing library:** SigV4A needs `awscrt`. `scripts/vendor_awscrt.py` (standard library only) downloads one pinned, hash-checked wheel and assembles the `CreateOrder` package; Terraform runs it through an `external` data source, so it needs `python3` and internet access when planning.
+
+**Rolling it out**
+
+1. Apply `terraform/bootstrap`: the permissions boundary gains the secondary Region (one in-place change). The deploy role is deliberately not extended.
+2. From the environment folder: `terraform apply -var enable_multi_region=true`. Expect about 54 resources to add and 6 to change, and no deletes. DynamoDB global tables use a service-linked role; if the apply complains about it, create `AWSServiceRoleForDynamoDBReplication` once with an identity that can manage IAM.
+3. Confirm the extra SNS subscription emails (notifications and alerts in the secondary Region).
+4. Test: `terraform output order_api_url_secondary` gives the secondary API. Sign requests for the secondary Region (`aws:amz:us-west-2:execute-api`).
+5. Rehearse a failover with the alarm in the `global_endpoint_failover_alarm` output (see the [FAQ](../docs/FAQ.md#multi-region)).
+6. **Before any change that triggers a pipeline deploy, switch it off:** `terraform apply -var enable_multi_region=false` (or run without the variable). The pipeline plans with it off and would delete the secondary stack, so its no-delete guard stops the run.
+
+**Costs:** the second Region is idle until used. Added: replicated DynamoDB writes (each write is billed in both Regions) and one Route 53 health check, about $0.50 a month.
+
+**Not included:** DNS routing for the API, event replication, a secondary dashboard, and a pipeline role for the second Region.
 
 ## Event authenticity
 
