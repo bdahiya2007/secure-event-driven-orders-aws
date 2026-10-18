@@ -2,7 +2,7 @@
 
 Questions about the design, the behaviour and the operation of this project, grouped by topic, with short answers and where to read more. Everything described here was built and checked in `dev` (one account, one region, one user) unless an answer says otherwise; "not tested" means exactly that.
 
-**Topics:** [Design and flow](#design-and-flow) | [The order API](#the-order-api) | [EventBridge](#eventbridge) | [SQS and fulfilment](#sqs-and-fulfilment) | [SNS and notifications](#sns-and-notifications) | [DynamoDB](#dynamodb) | [Lambda and Python](#lambda-and-python) | [Security and permissions](#security-and-permissions) | [Cost](#cost) | [Terraform and state](#terraform-and-state) | [CI/CD](#cicd) | [Operating and testing](#operating-and-testing)
+**Topics:** [Design and flow](#design-and-flow) | [The order API](#the-order-api) | [Idempotency](#idempotency) | [EventBridge](#eventbridge) | [SQS and fulfilment](#sqs-and-fulfilment) | [SNS and notifications](#sns-and-notifications) | [DynamoDB](#dynamodb) | [Lambda and Python](#lambda-and-python) | [Security and permissions](#security-and-permissions) | [Cost](#cost) | [Terraform and state](#terraform-and-state) | [CI/CD](#cicd) | [Operating and testing](#operating-and-testing)
 
 ---
 
@@ -21,7 +21,7 @@ So a failed save never produces an event for an order that does not exist. A sav
 The message goes back to the intake queue. On the retry `CreateOrder` finds the order already saved, confirms the stored order is the same one (same customer, lines and quantities), and publishes again, so a saved order is not left unannounced. Only if it fails three times does the message land in the intake dead-letter queue, where the alarm reports it; the order is then saved but unannounced until the message is redriven (redrive is untried). Before the API and queue were added, this case returned a `500` and was never retried.
 
 ### Is anything exactly-once?
-No. EventBridge, SQS and SNS all deliver **at least once**. Fulfilment is safe against repeats because its write is conditional on the `orderId`. The notification path does not deduplicate, so a rare repeat could send two identical emails. `CreateOrder` has no idempotency key, so a client that retries a request creates a second order (on the to-do list).
+No. EventBridge, SQS and SNS all deliver **at least once**. Fulfilment is safe against repeats because its write is conditional on the `orderId`. The notification path does not deduplicate, so a rare repeat could send two identical emails. `CreateOrder` is idempotent per `orderId` (see [Idempotency](#idempotency)), so a redelivered or concurrent copy of one message creates one order and publishes one event, except in one narrow window described there. The caller cannot supply its own idempotency key, so a client that retries the whole HTTP request still creates a second order.
 
 ### Why EventBridge, then SQS, rather than calling the fulfilment Lambda directly?
 The bus lets more consumers subscribe later without changing `CreateOrder` (the notification rule was added that way). The queue in front of `FulfilOrder` absorbs bursts, retries failures and keeps unprocessable messages in a dead-letter queue instead of losing them.
@@ -46,7 +46,7 @@ Because the order is accepted, not created. API Gateway has only queued it; savi
 Today only through the alarm: a message that fails three times ends in the intake dead-letter queue and the alarm emails the alerts topic. The API gives no way to read an order's status, which is a known limitation. A status endpoint would be the next step.
 
 ### My order returned `202` but never appeared. Why?
-`202` only means accepted. The order is validated again by `CreateOrder`, and an order it rejects is retried three times and then moved to the intake dead-letter queue without being saved. A repeated `itemId` is the known case: the API's schema cannot require unique item IDs, so the API accepts it. To find out, look at the intake dead-letter queue (`order-intake-<env>-dlq`) and the alarm email, and read the `CreateOrder` log for `Failed to process message`, which gives the message ID and the reason but never the order contents. An order status endpoint and an API-side check for repeated item IDs are on the to-do list.
+`202` only means accepted. The order is validated again by `CreateOrder`, and an order it rejects is retried three times and then moved to the intake dead-letter queue without being saved. A repeated `itemId` used to be the known case; the API now rejects it with `400`, so what remains is anything `CreateOrder` refuses that the API's schema allowed. To find out, look at the intake dead-letter queue (`order-intake-<env>-dlq`) and the alarm email, and read the `CreateOrder` log for `Failed to process message`, which gives the message ID and the reason but never the order contents. An order status endpoint is on the to-do list.
 
 ### Why is the order ID the request ID?
 So the caller has it in the `202` response without waiting, and so every retry of one queue message refers to the same order. A client that retries the whole HTTP request still creates a second order, because there is no idempotency key yet.
@@ -55,10 +55,33 @@ So the caller has it in the `202` response without waiting, and so every retry o
 It needs no extra service and keeps the endpoint closed to anyone without credentials, which suits service-to-service callers. An API key is not authentication. A Cognito or JWT authorizer would suit end users and is listed as an open gap (T1).
 
 ### What does the API reject before anything is queued?
-An unsigned request (`403`), a body that does not match the schema (`400`: only `customerId`, `items`, `itemId` and `quantity`, with length and range limits, nothing else), a content type other than JSON (`415`), and requests over the throttle (`429`). The `400` and `500` messages are fixed and never echo what the caller sent. All four were checked live on 2026-10-17, along with the happy path: a signed order returned `202`, was saved, fulfilled and announced within seconds, and the dead-letter queue and alarms stayed clean.
+An unsigned request (`403`), a body that does not match the schema or repeats an `itemId` (`400`: only `customerId`, `items`, `itemId` and `quantity`, with length and range limits, nothing else, and each `itemId` at most once), a content type other than JSON (`415`), and requests over the throttle (`429`). The `400` and `500` messages are fixed and never echo what the caller sent. All four were checked live on 2026-10-17, along with the happy path: a signed order returned `202`, was saved, fulfilled and announced within seconds, and the dead-letter queue and alarms stayed clean.
 
 ### Why can I not send a test message to the intake queue myself?
 The queue policy denies `sqs:SendMessage` to everyone except the API's role, administrators included, for the same reason as the bus policy: the queue is a trust boundary. To test, call the API. `CreateOrder` also re-validates every message, so a forged one could not store extra data.
+
+## Idempotency
+
+### How does `CreateOrder` avoid creating an order twice?
+Each `orderId` has one record in the `Orders-processing-<env>` table. Before doing anything, `CreateOrder` **claims** the order with a single conditional write: it succeeds only if there is no record yet, or the previous holder's lease has run out for the same order. The claim is the check and the lock in one step, so two copies of a message cannot both pass it. After the claim it saves the order lines (also a conditional write), publishes the `OrderCreated` event once, and records the result. The next copy of that message finds the record `COMPLETED` and returns the stored result without saving or publishing anything.
+
+### What if two copies of one message arrive at the same time?
+One wins the claim. The other finds the record `IN_PROGRESS` with a valid lease, does nothing, and reports the message as failed so SQS delivers it again after the visibility timeout (180 seconds). By then the first copy has finished, so the retry finds `COMPLETED` and returns the stored result. This was checked with a race test that delivers a second copy in the middle of the first.
+
+### What happens if `CreateOrder` crashes halfway?
+The lease (60 seconds) simply runs out. The next delivery takes it over, finds the order lines already saved and checks that they match the message, publishes the event if it was not published, and records the result. Nothing is lost and a saved order is never left unannounced.
+
+### Can the event still be published twice?
+In one narrow window, yes: the event goes out and then writing the result fails, for example because DynamoDB throttles. The retry cannot know the event went out, so it publishes again. This is the usual limit of at-least-once delivery; an exactly-once publish would need the event bus to deduplicate, and it cannot. The consumers tolerate it: `FulfilOrder` is idempotent, and the notification email could repeat in that window. Outside that window, redeliveries repeat nothing.
+
+### What does "the existing result" mean?
+The record stores the outcome of the first run, `{orderId, status: CREATED, createdAt, lines}`. A duplicate returns that same result and logs `Order already processed, nothing repeated`. SQS does not pass a Lambda's return value back to the producer, so the result is visible in the record and in the log rather than in an HTTP response.
+
+### What if an `orderId` is reused for a different order?
+The record keeps a fingerprint (a hash) of the customer and the lines. A message with the same `orderId` but different content is rejected, saved nowhere and published nowhere, and it ends in the dead-letter queue with an alarm. A `COMPLETED` record is never overwritten.
+
+### How long are the records kept, and why a separate table?
+Seven days, then DynamoDB's time-to-live removes them. That is longer than the four days SQS keeps a message, so a late redelivery is still recognised. The state sits in its own table so the order table keeps one clean item per order line, and so the claim and the result can be rewritten without touching order data. The table is named `Orders-processing-<env>` on purpose: the existing least-privilege patterns (`Orders-*`) already cover it, so the permissions boundary and the deploy role did not need to change.
 
 ## EventBridge
 
@@ -241,7 +264,7 @@ Every action in the workflows is pinned to a full commit SHA, so it does not upd
 The repository requires actions to be pinned to a full-length commit SHA. A `uses:` line with a tag or branch (for example `@v4`) is refused. Find the commit with `gh api repos/<owner>/<action>/commits/<tag> --jq .sha` and write it as `owner/action@<sha> # <tag>`.
 
 ### Why did a deploy stop with "the plan would delete or replace resources"?
-The guard refuses automatic deletions, because a replaced DynamoDB table loses its data. The most common cause is a missing repository secret: an empty `NOTIFICATION_EMAIL` or `ALERT_EMAIL` would delete that subscription. Set the secret and re-run, or run manually with `allow_destroy` if the deletion is intended.
+The guard refuses automatic deletions, because a replaced DynamoDB table loses its data. The most common cause is a missing repository secret: an empty `NOTIFICATION_EMAIL` or `ALERT_EMAIL` would delete that subscription. Set the secret and re-run, or run manually with `allow_destroy` if the deletion is intended. The one exception built into the guard is an API Gateway *deployment*: it is a stateless snapshot of the API definition that is replaced whenever the API changes, so its replacement is allowed.
 
 ### Can a pull request deploy or read my secrets?
 No. `validate.yml` uses no credentials, and `deploy.yml` never runs on pull requests. A fork's pull request cannot reach the secrets.

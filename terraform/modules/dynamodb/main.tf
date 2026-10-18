@@ -25,5 +25,15 @@ resource "aws_dynamodb_table" "this" {
     kms_key_arn = var.kms_key_arn
   }
 
+  # Expire rows by a timestamp attribute (used for idempotency records, which are only needed for a while).
+  dynamic "ttl" {
+    for_each = var.ttl_attribute == null ? [] : [var.ttl_attribute]
+
+    content {
+      attribute_name = ttl.value
+      enabled        = true
+    }
+  }
+
   tags = var.tags
 }

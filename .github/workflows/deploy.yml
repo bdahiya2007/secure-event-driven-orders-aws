@@ -130,7 +130,9 @@ jobs:
         if: ${{ !inputs.allow_destroy }}
         working-directory: ${{ env.WORKDIR }}
         run: |
-          doomed=$(terraform show -json tfplan | jq -r '.resource_changes[] | select(.change.actions | index("delete")) | .address')
+          # An API Gateway deployment is a stateless snapshot of the API definition. It is replaced (create before destroy)
+          # whenever the API changes, and nothing is lost, so that one resource type is allowed to be replaced.
+          doomed=$(terraform show -json tfplan | jq -r '.resource_changes[] | select(.change.actions | index("delete")) | select(.type != "aws_api_gateway_deployment") | .address')
           if [ -n "$doomed" ]; then
             echo "::error::The plan would delete or replace the resources listed below. Check the repository secrets are all set (a missing email secret deletes its subscription), or re-run manually with allow_destroy if this is intended."
             echo "$doomed"

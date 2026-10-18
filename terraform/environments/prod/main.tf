@@ -51,14 +51,27 @@ module "order_api" {
 module "create_order" {
   source = "../../modules/create_order"
 
-  function_name  = "CreateOrder-${var.environment}"
-  event_bus_name = module.event_bus.bus_name
-  event_bus_arn  = module.event_bus.bus_arn
-  table_name     = module.orders_table.table_name
-  table_arn      = module.orders_table.table_arn
-  queue_arn      = module.intake_queue.queue_arn
+  function_name         = "CreateOrder-${var.environment}"
+  event_bus_name        = module.event_bus.bus_name
+  event_bus_arn         = module.event_bus.bus_arn
+  table_name            = module.orders_table.table_name
+  table_arn             = module.orders_table.table_arn
+  queue_arn             = module.intake_queue.queue_arn
+  processing_table_name = module.processing_table.table_name
+  processing_table_arn  = module.processing_table.table_arn
 
   permissions_boundary_arn = local.permissions_boundary_arn
+}
+
+# One record per orderId that CreateOrder is processing or has processed: its lease, its status and the stored
+# result. Records expire after a week. The name starts with Orders- so the existing least-privilege patterns apply.
+module "processing_table" {
+  source = "../../modules/dynamodb"
+
+  table_name          = "Orders-processing-${var.environment}"
+  hash_key            = "orderId"
+  ttl_attribute       = "expiresAt"
+  deletion_protection = true
 }
 
 module "fulfilments_table" {

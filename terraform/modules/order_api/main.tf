@@ -8,11 +8,21 @@ locals {
   # Builds the queue message from validated fields only. $context.requestId (a UUID) becomes the orderId,
   # so the caller gets it in the response without waiting for any processing. $input.json() emits valid JSON,
   # and the whole message is URL-encoded for the SQS SendMessage form body.
+  #
+  # A JSON schema cannot require unique item IDs, so the template checks for a repeated itemId itself. For
+  # such an order it sends an empty MessageBody, which SQS refuses with a 400; the integration response below
+  # turns that into the same fixed "Invalid request" answer as any other bad body, and nothing is queued.
+  # Each directive line ends in ## so no stray newline reaches the form body.
   request_template = <<-EOT
-    #set($customer = $input.json('$.customerId'))
-    #set($items = $input.json('$.items'))
-    #set($message = "{""orderId"":""$context.requestId"",""receivedAt"":$context.requestTimeEpoch,""customerId"":$customer,""items"":$items}")
-    Action=SendMessage&MessageBody=$util.urlEncode($message)
+    #set($customer = $input.json('$.customerId'))##
+    #set($items = $input.json('$.items'))##
+    #set($seen = {})##
+    #set($duplicate = false)##
+    #foreach($item in $input.path('$.items'))#if($seen.containsKey($item.itemId))#set($duplicate = true)#end#set($discard = $seen.put($item.itemId, true))#end##
+    #set($message = "{""orderId"":""$context.requestId"",""receivedAt"":$context.requestTimeEpoch,""customerId"":$customer,""items"":$items}")##
+    #set($body = $util.urlEncode($message))##
+    #if($duplicate)#set($body = "")#end##
+    Action=SendMessage&MessageBody=$body
   EOT
 }
 
@@ -153,6 +163,17 @@ resource "aws_api_gateway_method_response" "accepted" {
   }
 }
 
+resource "aws_api_gateway_method_response" "bad_request" {
+  rest_api_id = aws_api_gateway_rest_api.this.id
+  resource_id = aws_api_gateway_resource.orders.id
+  http_method = aws_api_gateway_method.post.http_method
+  status_code = "400"
+
+  response_models = {
+    "application/json" = "Empty"
+  }
+}
+
 resource "aws_api_gateway_method_response" "error" {
   rest_api_id = aws_api_gateway_rest_api.this.id
   resource_id = aws_api_gateway_resource.orders.id
@@ -179,13 +200,27 @@ resource "aws_api_gateway_integration_response" "accepted" {
   depends_on = [aws_api_gateway_integration.sqs]
 }
 
-# Any error from SQS becomes a fixed 500, so internal details never reach the caller.
-resource "aws_api_gateway_integration_response" "error" {
+# SQS refusing the message (a repeated itemId, see the template) is a bad request, not a server error.
+resource "aws_api_gateway_integration_response" "bad_request" {
   rest_api_id       = aws_api_gateway_rest_api.this.id
   resource_id       = aws_api_gateway_resource.orders.id
   http_method       = aws_api_gateway_method.post.http_method
-  status_code       = aws_api_gateway_method_response.error.status_code
-  selection_pattern = "[45]\\d{2}"
+  status_code       = aws_api_gateway_method_response.bad_request.status_code
+  selection_pattern = "400"
+
+  response_templates = {
+    "application/json" = "{\"message\":\"Invalid request\"}"
+  }
+
+  depends_on = [aws_api_gateway_integration.sqs]
+}
+
+# Any other error from SQS becomes a fixed 500 (the default response), so internal details never reach the caller.
+resource "aws_api_gateway_integration_response" "error" {
+  rest_api_id = aws_api_gateway_rest_api.this.id
+  resource_id = aws_api_gateway_resource.orders.id
+  http_method = aws_api_gateway_method.post.http_method
+  status_code = aws_api_gateway_method_response.error.status_code
 
   response_templates = {
     "application/json" = "{\"message\":\"Internal error\"}"
@@ -231,6 +266,7 @@ resource "aws_api_gateway_deployment" "this" {
       aws_api_gateway_integration.sqs.uri,
       aws_api_gateway_integration_response.accepted.response_templates,
       aws_api_gateway_integration_response.error.response_templates,
+      aws_api_gateway_integration_response.bad_request.response_templates,
       aws_api_gateway_gateway_response.bad_request_body.response_templates,
     ]))
   }
@@ -242,6 +278,7 @@ resource "aws_api_gateway_deployment" "this" {
   depends_on = [
     aws_api_gateway_integration_response.accepted,
     aws_api_gateway_integration_response.error,
+    aws_api_gateway_integration_response.bad_request,
   ]
 }
 

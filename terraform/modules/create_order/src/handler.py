@@ -1,6 +1,8 @@
+import hashlib
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -23,14 +25,31 @@ serializer = TypeSerializer()
 
 EVENT_BUS_NAME = os.environ["EVENT_BUS_NAME"]
 TABLE_NAME = os.environ["TABLE_NAME"]
+PROCESSING_TABLE_NAME = os.environ["PROCESSING_TABLE_NAME"]
 
 MAX_ITEMS = 100  # DynamoDB transaction limit
 MAX_ID_LENGTH = 64
 MAX_QUANTITY = 1000
 
+# Idempotency: one record per orderId in the processing table.
+#   IN_PROGRESS  an invocation holds a lease on the order (lockOwner, lockedUntil)
+#   COMPLETED    the order is saved and its event published; `result` holds the outcome
+IN_PROGRESS = "IN_PROGRESS"
+COMPLETED = "COMPLETED"
+LEASE_SECONDS = 60  # longer than the function timeout; a crashed invocation's lease simply runs out
+RECORD_TTL_SECONDS = 7 * 24 * 3600  # longer than the 4-day queue retention, so a late redelivery is still recognised
+
 
 class ValidationError(Exception):
     pass
+
+
+class InProgress(Exception):
+    """Another invocation holds a valid lease on this order. The message is retried after the visibility timeout."""
+
+
+def _now():
+    return int(time.time())
 
 
 def _identifier(value, name):
@@ -90,6 +109,72 @@ def _parse(record):
     return {"orderId": order_id, "customerId": customer_id, "items": lines, "createdAt": created_at}
 
 
+def _payload_hash(order):
+    """Fingerprint of what the order says, so an orderId reused for different content is detected."""
+    canonical = {
+        "customerId": order["customerId"],
+        "items": sorted(order["items"], key=lambda line: line["itemId"]),
+    }
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _read_record(order_id):
+    page = dynamodb.query(
+        TableName=PROCESSING_TABLE_NAME,
+        KeyConditionExpression="orderId = :o",
+        ExpressionAttributeValues={":o": {"S": order_id}},
+        ConsistentRead=True,
+    )
+    items = page["Items"]
+    return items[0] if items else None
+
+
+def _claim(order, owner, now):
+    """Take the lease on this orderId with one conditional write, so concurrent deliveries cannot both win.
+
+    The write succeeds only if there is no record yet, or the previous holder's lease has run out and it
+    was for the same content. Returns None when this invocation now holds the lease, or the existing result
+    when the order was already completed. Raises InProgress if another invocation holds a valid lease.
+    """
+    digest = _payload_hash(order)
+    try:
+        dynamodb.put_item(
+            TableName=PROCESSING_TABLE_NAME,
+            Item={
+                "orderId": {"S": order["orderId"]},
+                "status": {"S": IN_PROGRESS},
+                "lockOwner": {"S": owner},
+                "lockedUntil": {"N": str(now + LEASE_SECONDS)},
+                "payloadHash": {"S": digest},
+                "createdAt": {"S": order["createdAt"]},
+                "updatedAt": {"N": str(now)},
+                "expiresAt": {"N": str(now + RECORD_TTL_SECONDS)},
+            },
+            ConditionExpression=(
+                "attribute_not_exists(orderId) OR "
+                "(#s = :in_progress AND lockedUntil < :now AND payloadHash = :hash)"
+            ),
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":in_progress": {"S": IN_PROGRESS},
+                ":now": {"N": str(now)},
+                ":hash": {"S": digest},
+            },
+        )
+        return None
+    except dynamodb.exceptions.ConditionalCheckFailedException:
+        pass
+
+    record = _read_record(order["orderId"])
+    if record is None:
+        raise InProgress("The processing record changed; retry")
+    if record["payloadHash"]["S"] != digest:
+        raise ValidationError("This orderId was already used for a different order")
+    if record["status"]["S"] == COMPLETED:
+        return json.loads(record["result"]["S"])
+    raise InProgress("Another invocation is processing this order")
+
+
 def _save(order):
     """Save one DynamoDB item per order line, atomically. Returns True if it was newly saved."""
     try:
@@ -117,7 +202,7 @@ def _save(order):
         return True
     except dynamodb.exceptions.TransactionCanceledException as e:
         reasons = [r.get("Code") for r in e.response.get("CancellationReasons", [])]
-        # Only "condition failed" means the lines already exist (an earlier delivery saved this order).
+        # Only "condition failed" means the lines already exist (an earlier attempt saved this order).
         # Anything else, such as throttling or a conflict, is retried.
         if "ConditionalCheckFailed" in reasons and set(reasons) <= {"ConditionalCheckFailed", "None"}:
             return False
@@ -126,7 +211,7 @@ def _save(order):
 
 
 def _confirm_already_saved(order):
-    """A redelivered message finds its order already saved. Make sure the stored order really is this one."""
+    """The lines already exist from an earlier attempt. Make sure the stored order really is this one."""
     stored = {}
     customers = set()
     request = {
@@ -166,18 +251,65 @@ def _publish(order):
         raise RuntimeError(f"PutEvents failed: {entry.get('ErrorCode')} {entry.get('ErrorMessage')}")
 
 
+def _complete(order, owner, result, now):
+    """Record the outcome. Only the invocation that still holds the lease may do so."""
+    try:
+        dynamodb.put_item(
+            TableName=PROCESSING_TABLE_NAME,
+            Item={
+                "orderId": {"S": order["orderId"]},
+                "status": {"S": COMPLETED},
+                "payloadHash": {"S": _payload_hash(order)},
+                "result": {"S": json.dumps(result)},
+                "createdAt": {"S": order["createdAt"]},
+                "updatedAt": {"N": str(now)},
+                "expiresAt": {"N": str(now + RECORD_TTL_SECONDS)},
+            },
+            ConditionExpression="#s = :in_progress AND lockOwner = :owner",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":in_progress": {"S": IN_PROGRESS}, ":owner": {"S": owner}},
+        )
+    except dynamodb.exceptions.ConditionalCheckFailedException:
+        # The lease ran out and another invocation took the order over. The work is done either way,
+        # and that invocation will record the same result.
+        logger.warning("Lease lost before the result was recorded for order %s", order["orderId"])
+
+
+def process_order(order, owner):
+    """Create the order exactly once in effect. Returns (result, already_processed)."""
+    existing = _claim(order, owner, _now())
+    if existing is not None:
+        return existing, True
+
+    if not _save(order):
+        _confirm_already_saved(order)
+    # Published after the order is saved. A failure from here on returns the message to the queue; the retry
+    # takes over the expired lease, finds the order saved, and publishes again.
+    _publish(order)
+
+    result = {
+        "orderId": order["orderId"],
+        "status": "CREATED",
+        "createdAt": order["createdAt"],
+        "lines": len(order["items"]),
+    }
+    _complete(order, owner, result, _now())
+    return result, False
+
+
 def lambda_handler(event, context):
     failures = []
+    request_id = getattr(context, "aws_request_id", None) or str(uuid.uuid4())
 
     for record in event["Records"]:
         try:
             order = _parse(record)
-            if not _save(order):
-                _confirm_already_saved(order)
-            # Published only after the order is saved. A failure here returns the message to the queue;
-            # the retry finds the order saved and publishes again, so a saved order is never left unannounced.
-            _publish(order)
-            logger.info("Order created: %s", order["orderId"])
+            owner = f"{request_id}:{record['messageId']}"
+            result, already = process_order(order, owner)
+            if already:
+                logger.info("Order already processed, nothing repeated: %s (%s)", result["orderId"], result["status"])
+            else:
+                logger.info("Order created: %s", result["orderId"])
         except Exception:
             # Log the message id only, never the body. After maxReceiveCount attempts SQS moves the
             # message to the dead-letter queue.
