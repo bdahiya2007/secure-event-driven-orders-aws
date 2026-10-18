@@ -16,6 +16,6 @@ output "health_check_id" {
 }
 
 output "alarm_name" {
-  description = "Set this alarm to ALARM to rehearse a failover, and back to OK to fail back"
+  description = "The alarm whose metric the health check watches. Setting its state does NOT trigger a failover: Route 53 reads the metric data, not the alarm state. Rehearse by inverting the health check instead."
   value       = aws_cloudwatch_metric_alarm.primary_unhealthy.alarm_name
 }
