@@ -30,6 +30,7 @@ flowchart LR
     end
     fn["Lambda<br/>CreateOrder"]
     ddb[("DynamoDB<br/>Orders")]
+    pdb[("DynamoDB<br/>Orders-processing<br/>idempotency records")]
     bus{{"EventBridge bus<br/>orders"}}
 
     subgraph fulfilment [Fulfilment]
@@ -58,8 +59,10 @@ flowchart LR
     apigw -- "2. SendMessage<br/>(202 Accepted + orderId)" --> iq
     iq --> fn
     iq -- "after 3 failed receives" --> idlq
-    fn -- "3. PutItem transaction<br/>(orderId + itemId)" --> ddb
-    fn -- "4. PutEvents<br/>OrderCreated" --> bus
+    fn -- "3. claim the orderId<br/>(conditional write)" --> pdb
+    fn -- "4. PutItem transaction<br/>(orderId + itemId)" --> ddb
+    fn -- "5. PutEvents<br/>OrderCreated" --> bus
+    fn -- "6. record the result" --> pdb
 
     bus --> rule --> sqs
     sqs --> ful
@@ -92,6 +95,7 @@ sequenceDiagram
     participant A as API Gateway
     participant I as Intake queue
     participant L as CreateOrder Lambda
+    participant P as DynamoDB Orders-processing
     participant D as DynamoDB Orders
     participant E as EventBridge bus
     participant Q as Fulfilment queue
@@ -109,10 +113,19 @@ sequenceDiagram
         A-->>C: 202 Accepted (orderId)
         I-)L: Batch of messages
         L->>L: Validate again
-        L->>D: TransactWriteItems (one item per order line)
-        L->>E: PutEvents OrderCreated
+        L->>P: Claim the orderId (conditional write with a lease)
+        alt already COMPLETED
+            P-->>L: Stored result
+            Note over L: Nothing repeated: no save, no event
+        else lease held by another invocation
+            L-->>I: Report failed message, retried later
+        else claimed
+            L->>D: TransactWriteItems (one item per order line)
+            L->>E: PutEvents OrderCreated
+            L->>P: Record COMPLETED and the result (only the lease holder may)
+        end
         alt save or publish fails
-            L-->>I: Report failed message, retried (the retry re-publishes), then sent to the intake dead-letter queue
+            L-->>I: Report failed message, retried, then sent to the intake dead-letter queue
         end
         par fulfilment
             E-)Q: Rule routes OrderCreated to queue
@@ -133,7 +146,7 @@ sequenceDiagram
 
 - **Asynchronous intake:** the API validates and queues, answers `202` straight away, and a consumer saves and publishes; the whole path retries safely, so a saved order is never left unannounced.
 - **Event-driven design with clear failure semantics:** save first, publish second, fan out through EventBridge, buffer with SQS, retry with partial-batch failure reporting, dead-letter after three failed receives.
-- **Idempotent consumers:** a redelivered order is saved once and confirmed against what is stored, and a redelivered fulfilment is a no-op, because both writes are conditional on the `orderId`.
+- **Idempotent processing:** `CreateOrder` claims each `orderId` with a conditional write and a lease, records the result, and answers a repeat with the stored result without saving or publishing again; concurrent copies cannot both proceed. `FulfilOrder` is idempotent in the same spirit.
 - **Infrastructure as code, modular:** nine reusable Terraform modules shared by two environments, with remote locked state.
 - **Security by default:** least-privilege IAM per function, a permissions boundary on every role the pipeline creates, allow-listed input, TLS-only and source-scoped queue and topic policies, no stored credentials.
 - **Delivery discipline:** pull requests are checked offline (format, validate, unit tests, `bandit`, `checkov`, secret scan); pushes to `main` deploy through GitHub OIDC with a guard that refuses to delete or replace anything automatically.
@@ -165,6 +178,7 @@ To report a vulnerability, see the [security policy](SECURITY.md).
 | **Request validation and throttling** | API Gateway rejects a body that does not match the JSON schema (only `customerId`, `items`, `itemId`, `quantity`, with length and range limits, no other fields) before anything is queued, with a fixed `400` message that does not echo the input. The stage is throttled to 10 requests per second (burst 20), and unsupported content types get `415`. |
 | **Intake queue** | Only the API's role may send to it (an explicit deny covers everyone else, administrators included); it is encrypted, TLS-only and dead-lettered after three failed receives, with its own alarm. API Gateway's role can do nothing but `SendMessage` on that queue. |
 | **Input handling** | `CreateOrder` validates every message again against an allow-list (IDs up to 64 characters, quantity 1 to 1000, up to 100 lines, unique item IDs, a lowercase UUID `orderId`) and drops unknown fields, so nothing on the queue can store arbitrary data. No price field is accepted. `FulfilOrder` re-validates every message instead of trusting the event. |
+| **Idempotent processing** | Each `orderId` has one record in a processing table. `CreateOrder` claims it with a conditional write (a lease), so two copies of a message cannot both proceed. A completed order returns its stored result without saving or publishing again, an expired lease is taken over by the next retry, and an `orderId` reused for different content is rejected (the record keeps a fingerprint of the order). Records expire after a week. |
 | **No overwrites, no half orders** | Order lines are written in one transaction with a condition expression, so a duplicate `itemId` rejects the whole order. |
 | **Least-privilege IAM** | `CreateOrder` can write its own logs, `PutItem` on the Orders table and `PutEvents` on the one bus. `FulfilOrder` can write its own logs, read and delete from the one queue, and `PutItem` on the Fulfilments table. No `*` actions or resources. |
 | **Permissions boundary** | Both Lambda roles carry `orders-pipeline-app-role-boundary`, a ceiling that caps them at exactly those actions, even if a role policy were widened later. |
@@ -190,12 +204,11 @@ Residual risks from the [threat model](docs/THREAT_MODEL.md), highest first. Eac
 | **T7** | Medium | The caller's identity is not stored with an order, API access logging is off (it needs an account-wide API Gateway logging role), and CloudTrail coverage is unverified | Record the caller, add API access logs, confirm CloudTrail |
 | T22 | Low | The account ID is now masked in the Actions logs (verified), but resource names, queue names and API IDs are still visible in the plan output | Reviewed before the repository became public; the names are not secrets |
 | T27 | Low | The commit history shows the author's personal email (also public in the companion repository) and an unlinked placeholder noreply address on 19 commits | Kept deliberately; turn on GitHub's email privacy settings |
-| T28 | Low | The API accepts an order that `CreateOrder` can never create (a repeated `itemId`); the caller sees `202` and only the alarm reports the failure | Reject it in the API's mapping template, or add an order status |
 | T25 | Low | The deploy role can manage REST APIs in the account, not only this project's, because API IDs are not known in advance | Tag-based access control |
 | T11 | Low | The stage is throttled and the consumer capped, but there is no per-caller quota, reserved concurrency or budget alarm | A usage plan, a reserved concurrency limit, an AWS Budget alert |
 | T14 | Low | A message that fails three times leaves the order saved but unannounced, in the intake dead-letter queue, until redriven | Redrive tooling (untried) |
 | T8, T9 | Low | SNS topics are unencrypted; tables use the AWS-managed key | A customer-managed KMS key |
-| T15 | Low | No idempotency key on create, and a repeat could send two notification emails | Accept and store a client-supplied key |
+| T15 | Low | The caller cannot supply an idempotency key, so a retried HTTP request creates a second order; a repeat of one queued message no longer does | Accept a client-supplied order ID |
 | T18 | Low | `dev` has no deletion protection, and the pipeline's no-delete guard can be overridden by hand | Keep the override manual and logged |
 | T19 | Low | The transitive packages of `bandit` and `checkov` are not pinned (they run with no AWS credentials) | A hashed requirements file for the scan tools |
 | T21 | Low | The Terraform state holds the subscription emails in plain text and sits in a bucket shared with another project | A dedicated state bucket, or exclude the addresses from state |
@@ -280,7 +293,7 @@ curl -s -X POST "$URL" \
 | Response | Meaning |
 |---|---|
 | `202` | Accepted: the order is queued, not yet saved. Body is `{"orderId": "...", "status": "ACCEPTED"}` |
-| `400` | The body does not match the schema. Nothing was queued |
+| `400` | The body does not match the schema, or repeats an `itemId`. Nothing was queued |
 | `403` | The request was not signed, or the caller may not invoke the API |
 | `415` | The content type is not `application/json` |
 | `429` | Throttled |
@@ -307,6 +320,7 @@ safeguards are described in the [Terraform reference](terraform/README.md#cicd-g
 - **Terraform, not SAM.** The whole stack, including the Lambdas and the pipeline role, is one tool. Nothing in the design depends on it.
 - **Queue first, then process.** API Gateway writes straight to SQS with no Lambda in the request path, so the caller is never held up by DynamoDB or EventBridge, and a burst piles up in the queue instead of failing. The cost is that `202` means accepted, not created.
 - **Save first, publish second, and retry the pair.** A failed save never produces an event for an order that does not exist. If the publish fails after a successful save, the message returns to the queue; the retry finds the order already stored, confirms it is the same order, and publishes again, so a saved order is not left unannounced.
+- **Idempotent by lease, not by luck.** Reading "has this order been processed?" and then acting would let two copies race, so the check and the claim are one conditional write. The holder gets a lease; a crashed holder's lease runs out and the next retry takes over. The result is recorded only by the lease holder, and a record that is `COMPLETED` is never overwritten. Publishing an event cannot be made exactly once (the event can go out and the result still fail to be written), so that one window can repeat an event; the consumers tolerate it.
 - **The request ID is the order ID.** API Gateway's request ID (a UUID) is the `orderId`, so the caller has it immediately and every retry of one message refers to the same order. A client that retries the whole request still creates a second order (no idempotency key yet).
 - **AWS IAM signing for the API.** It needs no extra service and keeps the endpoint closed to anyone without credentials. It suits service-to-service callers; an end-user flow would add Cognito or another authorizer.
 - **EventBridge, then SQS.** The bus lets consumers be added without touching `CreateOrder` (the notification rule was added that way). The queue absorbs bursts, retries failures and keeps unprocessable messages in a dead-letter queue.
@@ -326,8 +340,7 @@ More questions and answers are in the [FAQ](docs/FAQ.md).
 | **No end-user authentication** | The API accepts AWS-signed requests only, so it suits other services, not browsers or customers | Add a Cognito or JWT authorizer |
 | **Fulfilment only records `FULFILLED`** | There is no inventory or shipping logic | Real processing in `FulfilOrder` |
 | **A failed order is only visible as an alarm** | The caller gets `202` before the order is saved, so a message that fails three times ends in the intake dead-letter queue and the alarm; the order may be saved but unannounced until it is redriven | Redrive tooling, and an order status the caller can read |
-| **The API accepts orders that can never succeed** | An order that repeats an `itemId` passes the API's schema and gets `202`, but `CreateOrder` rejects it three times and it ends in the intake dead-letter queue (verified live). Nothing is saved or published, and only the alarm reports it | Reject repeated item IDs in the API's mapping template, or add an order status the caller can read |
-| **No idempotency key on create** | A client retry creates a second order | Accept and store a client-supplied key |
+| **The caller cannot supply an idempotency key** | `orderId` is API Gateway's request ID, so a client that retries the whole HTTP request creates a second order. Redeliveries of one queued message are now fully idempotent | Accept a client-supplied order ID and return the stored result for it |
 | **SNS topics and table keys** | Topics are unencrypted (EventBridge and CloudWatch need a customer-managed key); tables use the AWS-managed key | A customer-managed KMS key |
 | **No event replay** | An event with no matching rule, or a consumer added later, cannot see past events | An EventBridge archive |
 | **No `pip-audit` yet** | Nothing to audit until the Lambdas have a pinned requirements file | Add it with the first third-party dependency |

@@ -98,7 +98,7 @@ Two workflows live in `.github/workflows/` (they take effect once this folder is
 
 **Environments:** a push deploys `dev`. Run the workflow manually from the Actions tab and choose `prod` to deploy it. Create GitHub environments named `dev` and `prod` to add required reviewers.
 
-**No-delete guard:** the run stops if the plan would delete or replace anything, because a replaced table loses its data and a missing email secret would delete a subscription. Re-run manually with `allow_destroy` only when that is intended. The run summary lists each change by action and resource address, never ARNs or IDs.
+**No-delete guard:** the run stops if the plan would delete or replace anything (except an API Gateway deployment, a stateless snapshot that is replaced whenever the API changes), because a replaced table loses its data and a missing email secret would delete a subscription. Re-run manually with `allow_destroy` only when that is intended. The run summary lists each change by action and resource address, never ARNs or IDs.
 
 **Authentication is GitHub OIDC: no AWS keys are stored in GitHub.** The workflow assumes the role `orders-pipeline-deploy-role` with a short-lived token. The role's trust policy pins this exact repository by its immutable owner and repository IDs and allows only jobs running in the `dev` or `prod` GitHub environment, so pull requests, other branches and other repositories cannot assume it. The role and its permissions boundary are created by `terraform/bootstrap`, which is applied **manually** and never by the pipeline, so the pipeline cannot widen its own permissions.
 
@@ -185,7 +185,7 @@ aws sqs get-queue-attributes --queue-url "$(terraform output -raw fulfilment_dlq
 `modules/order_api` creates a REST API with one route, `POST /orders`, wired straight to the `order-intake-<env>` SQS queue with no Lambda in the request path:
 
 - **Authorisation:** `AWS_IAM`. The request must be SigV4-signed by a principal allowed `execute-api:Invoke`.
-- **Validation:** the body must match a JSON schema (`customerId`, and `items` of `itemId` with an optional `quantity`, no other fields) or API Gateway answers `400` with a fixed message. Other content types get `415`.
+- **Validation:** the body must match a JSON schema (`customerId`, and `items` of `itemId` with an optional `quantity`, no other fields) or repeats an `itemId` (checked in the request template, because a JSON schema cannot express it), or API Gateway answers `400` with a fixed message. Other content types get `415`.
 - **Message:** a mapping template builds the queue message from the validated fields, with `$context.requestId` as the `orderId` and the request time as `receivedAt`. The caller gets `202` with the `orderId` at once.
 - **Throttling:** 10 requests per second, burst 20, on the stage.
 - **Access:** the API assumes a role that can only `SendMessage` on that queue. The queue policy denies sending to everyone else, so nothing can write to it behind the API's back.
@@ -210,6 +210,20 @@ curl -s -X POST "$(terraform output -raw order_api_url)" \
 Until step 3 completes there is a short window where `CreateOrder` is triggered by the queue instead of being invoked directly, so a direct `aws lambda invoke` no longer works afterwards.
 
 **Not included.** API access logging and execution logging are off because they need an account-wide API Gateway CloudWatch role, which this project does not change. There is no WAF, cache or client certificate.
+
+## Idempotent processing
+
+`CreateOrder` processes each `orderId` once in effect. The state lives in a second table, `Orders-processing-<env>` (key `orderId` only, point-in-time recovery on, deletion protection in prod, time-to-live on `expiresAt`). One record per order holds:
+
+| Attribute | Meaning |
+|---|---|
+| `status` | `IN_PROGRESS` while an invocation holds the lease, `COMPLETED` once the order is saved and its event published |
+| `lockOwner`, `lockedUntil` | The lease: the holder and when it ends (60 seconds after the claim) |
+| `payloadHash` | A fingerprint of the customer and the order lines, so an `orderId` reused for different content is detected |
+| `result` | The stored outcome, returned to every later copy of the message |
+| `expiresAt` | Seven days after the last write; DynamoDB then deletes the record |
+
+The claim is one `PutItem` with a condition (no record, or an expired lease for the same fingerprint), so concurrent copies cannot both win. The result is recorded with a condition too: only the holder of the lease may write it, and a `COMPLETED` record is never overwritten. The Lambda role may only `PutItem` and `Query` this table. No bootstrap change was needed, because the name starts with `Orders-` and the boundary and the deploy role already cover `Orders-*`.
 
 ## Event authenticity
 

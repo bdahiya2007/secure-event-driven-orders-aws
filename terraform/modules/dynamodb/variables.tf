@@ -37,3 +37,9 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "ttl_attribute" {
+  description = "Name of a number attribute holding an expiry time in epoch seconds; null disables time-to-live"
+  type        = string
+  default     = null
+}

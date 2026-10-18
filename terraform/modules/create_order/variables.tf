@@ -23,6 +23,16 @@ variable "table_arn" {
   type        = string
 }
 
+variable "processing_table_name" {
+  description = "DynamoDB table holding one idempotency record per orderId (lease, status and result)"
+  type        = string
+}
+
+variable "processing_table_arn" {
+  description = "ARN of the processing table (scopes the PutItem and Query permissions)"
+  type        = string
+}
+
 variable "queue_arn" {
   description = "SQS queue the function consumes orders from"
   type        = string

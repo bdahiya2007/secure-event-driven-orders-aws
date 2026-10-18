@@ -43,13 +43,14 @@ data "aws_iam_policy_document" "permissions" {
 
   statement {
     actions   = ["dynamodb:PutItem"]
-    resources = [var.table_arn]
+    resources = [var.table_arn, var.processing_table_arn]
   }
 
-  # Read-only, to confirm a redelivered message really is the order already stored.
+  # Reads: confirm a redelivered message is the order already stored, and read the processing record
+  # (the lease and, once finished, the stored result).
   statement {
     actions   = ["dynamodb:Query"]
-    resources = [var.table_arn]
+    resources = [var.table_arn, var.processing_table_arn]
   }
 
   statement {
@@ -76,8 +77,9 @@ resource "aws_lambda_function" "this" {
 
   environment {
     variables = {
-      EVENT_BUS_NAME = var.event_bus_name
-      TABLE_NAME     = var.table_name
+      EVENT_BUS_NAME        = var.event_bus_name
+      TABLE_NAME            = var.table_name
+      PROCESSING_TABLE_NAME = var.processing_table_name
     }
   }
 
