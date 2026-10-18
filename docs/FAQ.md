@@ -109,6 +109,15 @@ Place orders and see where they are processed: the `FulfilOrder-dev` log group i
 ### How long does a failover take, and how long does fail-back take?
 Observed in `dev` on 2026-10-18, with upper bounds because the probes were sparse: after the health check was inverted at 06:37:41 UTC, new events were routed to the secondary by 06:45:21, within 7 minutes 40 seconds. After it was restored at 06:45:18, an order placed 3 seconds later was still processed in the secondary, and one placed 97 seconds after the restore was processed in the primary again, so fail-back completed within 97 seconds. Expect several minutes, not seconds, to fail over; a precise measurement would need frequent probe orders, each of which sends a notification email.
 
+### Where is the disaster recovery plan written down?
+In [DISASTER_RECOVERY.md](DISASTER_RECOVERY.md): what is built, what to expect (detection, failover and fail-back times, data and event loss), failure scenarios, manual failover and fail-back, the rehearsal and its results, and the known gaps. Nothing here has faced a real outage; the times come from a rehearsal with an inverted health check.
+
+### What happens if the whole primary Region goes down?
+The primary API is unreachable, so callers must switch to the secondary API URL themselves (there is no DNS routing). Once the health check turns unhealthy, which takes at least five minutes of real impairment, events go to the secondary bus. Messages already in the primary queues wait for the Region, and events in the primary bus at that moment are not copied. The detail is in [DISASTER_RECOVERY.md](DISASTER_RECOVERY.md#failure-scenarios).
+
+### Does a failure of Lambda or DynamoDB in the primary trigger the failover?
+No. The health check watches only EventBridge ingestion latency. For other failures use the secondary API and invert the health check by hand ([how](#how-can-i-rehearse-a-failover)).
+
 ### Why is event replication off?
 With replication on, the endpoint copies every event to the secondary bus, where the secondary rules would process it as well: two fulfilment runs and two emails per order. With replication off, an event goes to one bus. The cost is that events already in the primary when it fails are not available in the secondary.
 
