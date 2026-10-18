@@ -88,6 +88,14 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # Terraform prints resource IDs and ARNs, which contain the AWS account ID. GitHub only hides values it knows
+      # about, so register the account ID as a mask before any Terraform step runs. Every later occurrence in the
+      # logs is replaced with ***, which matters once the repository (and its run logs) is public.
+      - name: Mask the AWS account ID in the logs
+        run: |
+          account_id=$(aws sts get-caller-identity --query Account --output text)
+          echo "::add-mask::${account_id}"
+
       - name: Terraform init
         working-directory: ${{ env.WORKDIR }}
         run: terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
