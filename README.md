@@ -188,7 +188,7 @@ Residual risks from the [threat model](docs/THREAT_MODEL.md), highest first. Eac
 |---|---|---|---|
 | **T1** | Medium | The API accepts AWS-signed requests only; there is no end-user identity, so it is not safe to expose to browsers or customers | A Cognito or JWT authorizer |
 | **T7** | Medium | The caller's identity is not stored with an order, API access logging is off (it needs an account-wide API Gateway logging role), and CloudTrail coverage is unverified | Record the caller, add API access logs, confirm CloudTrail |
-| T22 | Low | The account ID is now masked in the Actions logs (verified), but resource names, queue names and API IDs are still visible in the plan output | Review a plan before the first public release |
+| T22 | Low | The account ID is now masked in the Actions logs (verified), but resource names, queue names and API IDs are still visible in the plan output | Reviewed before the repository became public; the names are not secrets |
 | T27 | Low | The commit history shows the author's personal email (also public in the companion repository) and an unlinked placeholder noreply address on 19 commits | Kept deliberately; turn on GitHub's email privacy settings |
 | T25 | Low | The deploy role can manage REST APIs in the account, not only this project's, because API IDs are not known in advance | Tag-based access control |
 | T11 | Low | The stage is throttled and the consumer capped, but there is no per-caller quota, reserved concurrency or budget alarm | A usage plan, a reserved concurrency limit, an AWS Budget alert |
@@ -221,7 +221,9 @@ There is no VPC, NAT gateway or provisioned capacity. See the [FAQ](docs/FAQ.md#
 
 ```
 .
-├── .github/workflows/         # validate.yml (pull requests), deploy.yml (push to main)
+├── .github/
+│   ├── workflows/             # validate.yml (pull requests), deploy.yml (push to main)
+│   └── dependabot.yml         # weekly grouped updates for the pinned actions
 ├── SECURITY.md                # how to report a vulnerability
 ├── .checkov.yaml              # reviewed checkov exceptions, each with a reason
 ├── .githooks/pre-commit       # runs the secret scan before every commit

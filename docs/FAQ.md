@@ -200,7 +200,7 @@ It copies the local state file into the new S3 backend the first time you switch
 ## CI/CD
 
 ### What do the workflows do?
-`validate.yml` runs offline on pull requests (format, validate, handler compile check, unit tests, `bandit`, `checkov` and the secret scan). `deploy.yml` runs on pushes to `main`: checks, `plan`, a guard against deletions, then `apply` of that saved plan. Details in [terraform/README.md](../terraform/README.md#cicd-github-actions). They have not run yet because the project is not pushed to GitHub.
+`validate.yml` runs offline on pull requests (format, validate, handler compile check, unit tests, `bandit`, `checkov` and the secret scan). `deploy.yml` runs on pushes to `main`: checks, `plan`, a guard against deletions, then `apply` of that saved plan. Details in [terraform/README.md](../terraform/README.md#cicd-github-actions). Both run on GitHub Actions, and the five pull-request checks are required before anything can merge into `main`.
 
 ### Where is the SAM `package` and `update-function-code` step?
 There is none, because the project is Terraform. The `archive_file` data sources zip each handler during `plan`, and `apply` updates a Lambda when its code hash changes.
@@ -222,6 +222,18 @@ The first run reported 19 findings across nine rules. Each skip in `.checkov.yam
 
 ### Why is there no `pip-audit` step?
 The Lambdas use only the standard library and the `boto3` that the runtime provides, so there is no pinned dependency list to audit. Add it when a `requirements.txt` exists.
+
+### Why can I not push to `main`?
+Branch protection requires every change to go through a pull request with five passing checks (unit tests, `bandit`, `checkov`, the secret scan and the Terraform validation), with the branch up to date, and it includes administrators, so it binds you too. A direct push is refused with `GH006`. Work on a branch, push it, open a pull request and merge once the checks pass. If a pull request cannot be merged, check that the required check names match the jobs that actually ran (`gh pr checks <number>`) and that the PR is not still a draft.
+
+### What protects the repository now that it is public?
+`main` is protected as above. The `dev` and `prod` environments accept only protected branches, and `prod` needs the owner's approval. Secret scanning with push protection, Dependabot alerts and private vulnerability reporting are on, the Actions token is read-only, workflows from first-time contributors need approval, actions must be pinned to a full commit SHA, and merged branches are deleted automatically. Vulnerabilities are reported privately, as described in [SECURITY.md](../SECURITY.md).
+
+### Why did Dependabot open a pull request?
+Every action in the workflows is pinned to a full commit SHA, so it does not update by itself. Once a week Dependabot opens one grouped pull request that bumps the pinned SHAs and their version comments. The five checks run on it like on any other change; read what changed in each action, then merge it.
+
+### Why did a workflow fail because of an unpinned action?
+The repository requires actions to be pinned to a full-length commit SHA. A `uses:` line with a tag or branch (for example `@v4`) is refused. Find the commit with `gh api repos/<owner>/<action>/commits/<tag> --jq .sha` and write it as `owner/action@<sha> # <tag>`.
 
 ### Why did a deploy stop with "the plan would delete or replace resources"?
 The guard refuses automatic deletions, because a replaced DynamoDB table loses its data. The most common cause is a missing repository secret: an empty `NOTIFICATION_EMAIL` or `ALERT_EMAIL` would delete that subscription. Set the secret and re-run, or run manually with `allow_destroy` if the deletion is intended.
