@@ -179,7 +179,7 @@ flowchart LR
 - **What is active-active:** both Regions accept orders at the same time, each through its own API, queue and `CreateOrder`, writing to the same global tables.
 - **What is not:** a global endpoint is **active-passive for event routing**. Events go to the primary bus while Route 53 considers the primary healthy, and to the secondary bus after a failover, so fulfilment and notifications run in one Region at a time. Event replication is off, so the secondary rules never process the same event a second time.
 - **Failover:** a Route 53 health check follows EventBridge's ingestion-latency metric, and the global endpoint follows the health check. Inverting the health check rehearses a failover and restoring it fails back; in `dev`, events were routed to the secondary within 7 minutes 40 seconds and back to the primary within 97 seconds. Events in flight in the primary when it fails are not copied to the secondary.
-- **Cost and operation:** the second copy is idle until used. The extra costs are the replicated writes and a Route 53 health check of about $0.50 a month. It is applied from a workstation, not the pipeline. Setup, failover rehearsal and the limits are in the [Terraform reference](terraform/README.md#multi-region-optional) and the [FAQ](docs/FAQ.md#multi-region).
+- **Cost and operation:** the second copy is idle until used. The extra costs are the replicated writes and a Route 53 health check of about $0.50 a month. It is applied from a workstation, not the pipeline. Setup is in the [Terraform reference](terraform/README.md#multi-region-optional); expectations, failure scenarios, failover steps and gaps are in [docs/DISASTER_RECOVERY.md](docs/DISASTER_RECOVERY.md), with more in the [FAQ](docs/FAQ.md#multi-region).
 
 ## What this demonstrates
 
@@ -287,6 +287,7 @@ There is no VPC, NAT gateway or provisioned capacity. See the [FAQ](docs/FAQ.md#
 ├── .githooks/pre-commit       # runs the secret scan before every commit
 ├── docs/
 │   ├── THREAT_MODEL.md        # STRIDE threat model, controls and residual risks
+│   ├── DISASTER_RECOVERY.md   # multi-region objectives, failover steps, gaps
 │   ├── FAQ.md                 # design, behaviour, operations and CI/CD questions
 │   └── SECRET_SCANNING.md     # what the scanner blocks and how to use it
 ├── scripts/                   # secret-scan.py, install-hooks.sh, vendor_awscrt.py (multi-region build)
