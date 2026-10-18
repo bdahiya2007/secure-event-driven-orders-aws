@@ -190,7 +190,7 @@ aws sqs get-queue-attributes --queue-url "$(terraform output -raw fulfilment_dlq
 - **Throttling:** 10 requests per second, burst 20, on the stage.
 - **Access:** the API assumes a role that can only `SendMessage` on that queue. The queue policy denies sending to everyone else, so nothing can write to it behind the API's back.
 
-`CreateOrder` consumes the queue in batches of 10 (at most 5 concurrent), with partial-batch failure reporting. A message that fails three times moves to `order-intake-<env>-dlq`, which has its own alarm. Message processing is retry-safe: a redelivery finds the order already stored, confirms it is the same one, and publishes again.
+`CreateOrder` consumes the queue in batches of 10 (at most 5 concurrent), with partial-batch failure reporting. A message that fails three times moves to `order-intake-<env>-dlq`, which has its own alarm. This path was tested live with an order that repeats an `itemId`: the API answered `202`, `CreateOrder` rejected it on three attempts 180 seconds apart, SQS moved it to the dead-letter queue on the fourth receive, nothing was saved or published, and the alarm fired. Message processing is retry-safe: a redelivery finds the order already stored, confirms it is the same one, and publishes again.
 
 Call it with a signed request (curl 7.75 or newer):
 
