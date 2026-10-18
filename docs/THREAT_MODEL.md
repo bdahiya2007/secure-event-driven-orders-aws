@@ -107,19 +107,19 @@ Rating is the residual risk after the listed controls: **Low**, **Medium** or **
 | T19 | Tampering | Compromised workflow or dependency | Actions pinned by commit SHA, provider versions locked, tool versions pinned, Lambdas use only the standard library and the runtime's `boto3`, scans on every pull request | Low | Transitive packages of `bandit` and `checkov` are not pinned; they run without AWS credentials |
 | T20 | Information disclosure | Secrets or personal data reach the repository | Pre-commit hook and CI secret scan, git-ignored state and variable files, emails kept in repository secrets and a local file | Low | The repository is private; the scan is the safeguard if it ever becomes public |
 | T21 | Information disclosure | Terraform state leaks | Private, versioned, encrypted bucket, TLS-only, native locking; the deploy role can reach only this project's key prefix | Low | State holds the subscription emails in plain text (marked sensitive only in plan output) and sits in a bucket shared with another project |
-| T22 | Information disclosure | Account details appear in public CI logs | Plan summary lists only action and address | Medium | The full plan and apply output print ARNs and the account ID. Acceptable while private; must be masked before the repository is made public |
+| T22 | Information disclosure | Account details appear in public CI logs | A workflow step registers the AWS account ID as a mask before Terraform runs, so every later occurrence prints as `***`. Verified live on 2026-10-17: the first run with the step has 0 occurrences of the ID and 22 masked ARNs and URLs, and the three earlier runs that showed it were deleted | Low | Resource names, queue names and API IDs are still visible in the plan output; they are not secrets, but review a plan before the first public release |
 | T23 | Repudiation | Who deployed what | Every change is a pull request or push with a workflow run log; the role session is traceable in CloudTrail | Low | No branch protection to force pull requests |
 | T25 | Elevation of privilege | A compromised deploy role changes an API other than this project's | The role is limited to one region and to the REST API actions the Terraform needs; it cannot create or change IAM roles outside this project's two prefixes | Low | REST API IDs are generated, so the permission cannot be scoped to this project's API by name; the role can edit any REST API in the account. Narrowing it with tags is a follow-up |
+| T27 | Information disclosure | The commit history exposes a personal email address | New commits use the GitHub noreply address; scans cover file contents and every added line | Low | 19 commits carry an unlinked placeholder noreply address and the earlier ones the author's personal email, which is also public in the companion repository. Kept deliberately; a rewrite would also need the closed pull-request refs purged by GitHub. Turn on GitHub's email privacy settings |
 
 ## Residual risk summary
 
-Closed or reduced since the first version of this model: T5 and T6 (forged events, by the bus policy and the order check), T14 (a failed publish is now retried), T11 (throttling and validation at the edge) and, partly, T1 (the API requires signed requests).
+Closed or reduced since the first version of this model: T22 (the account ID is masked in the logs), T5 and T6 (forged events, by the bus policy and the order check), T14 (a failed publish is now retried), T11 (throttling and validation at the edge) and, partly, T1 (the API requires signed requests).
 
 1. **T1: no end-user authentication.** Fine for service-to-service callers; add an authorizer before exposing the API to browsers or customers.
 2. **T7: no caller identity or API access logs.** Needs an account-wide API Gateway logging role and a decision on CloudTrail.
 3. **T16: environment not bound to a branch.** Needs a public repository or a paid GitHub plan to restrict deployments to `main` and require approval for `prod`.
-4. **T22: public CI logs.** Hide the full plan and mask the account ID before making the repository public.
-5. **T25: the deploy role can manage any REST API in the account.** Narrow it with tags.
+4. **T25: the deploy role can manage any REST API in the account.** Narrow it with tags.
 
 ## Keeping it current
 
