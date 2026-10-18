@@ -45,6 +45,9 @@ Because the order is accepted, not created. API Gateway has only queued it; savi
 ### How does a caller find out that an order failed?
 Today only through the alarm: a message that fails three times ends in the intake dead-letter queue and the alarm emails the alerts topic. The API gives no way to read an order's status, which is a known limitation. A status endpoint would be the next step.
 
+### My order returned `202` but never appeared. Why?
+`202` only means accepted. The order is validated again by `CreateOrder`, and an order it rejects is retried three times and then moved to the intake dead-letter queue without being saved. A repeated `itemId` is the known case: the API's schema cannot require unique item IDs, so the API accepts it. To find out, look at the intake dead-letter queue (`order-intake-<env>-dlq`) and the alarm email, and read the `CreateOrder` log for `Failed to process message`, which gives the message ID and the reason but never the order contents. An order status endpoint and an API-side check for repeated item IDs are on the to-do list.
+
 ### Why is the order ID the request ID?
 So the caller has it in the `202` response without waiting, and so every retry of one queue message refers to the same order. A client that retries the whole HTTP request still creates a second order, because there is no idempotency key yet.
 
@@ -76,7 +79,9 @@ The rule has an **input transformer** that sends `Order <orderId> was created at
 It reads the queue in batches of up to 10, re-validates every message, and writes one record per order to `Fulfilments-<env>` with `status` `FULFILLED`, `itemCount`, `totalQuantity`, `eventId`, `orderCreatedAt` and `fulfilledAt`. That is all it does today: there is no inventory or shipping logic yet.
 
 ### What happens when processing fails?
-Only the failed messages in a batch go back to the queue (`ReportBatchItemFailures`). After **3 failed receives** a message moves to `order-fulfilment-<env>-dlq`, where it is kept for 14 days. A CloudWatch alarm fires when the dead-letter queue is not empty. The failure path was tested in `dev`: a message that cannot be parsed was retried, moved to the dead-letter queue on the fourth receive attempt (SQS moves a message when a receive would exceed `maxReceiveCount`, so 3 allowed receives, 180 seconds apart, then the move), and the alarm went to `ALARM` about 11 minutes after the message was sent. The test is in [terraform/README.md](../terraform/README.md#asynchronous-fulfilment).
+On both queues (the intake queue feeding `CreateOrder` and the fulfilment queue feeding `FulfilOrder`) only the failed messages in a batch go back to the queue (`ReportBatchItemFailures`). A message gets **three processing attempts**, 180 seconds apart (the visibility timeout). When SQS would deliver it a fourth time it moves it to the queue's dead-letter queue instead (`maxReceiveCount = 3`), where it is kept for 14 days. A CloudWatch alarm per dead-letter queue fires when it is not empty. Nothing is retried forever and nothing is lost.
+
+Both paths were tested live on 2026-10-17: on the fulfilment queue with an unparseable message and a well-formed forged one, and on the intake queue with an order that repeats an `itemId` (accepted by the API, rejected three times by `CreateOrder`, then dead-lettered with a receive count of 4). The alarm went to `ALARM` about 11 minutes after each message was sent. The test is in [terraform/README.md](../terraform/README.md#asynchronous-fulfilment).
 
 ### How can I get messages out of the dead-letter queue?
 Read them with the CLI, fix the cause, then redrive them to the source queue (SQS offers a redrive task in the console and CLI). Redrive has **not been tried** in this project.

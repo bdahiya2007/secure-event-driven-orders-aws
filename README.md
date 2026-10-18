@@ -190,6 +190,7 @@ Residual risks from the [threat model](docs/THREAT_MODEL.md), highest first. Eac
 | **T7** | Medium | The caller's identity is not stored with an order, API access logging is off (it needs an account-wide API Gateway logging role), and CloudTrail coverage is unverified | Record the caller, add API access logs, confirm CloudTrail |
 | T22 | Low | The account ID is now masked in the Actions logs (verified), but resource names, queue names and API IDs are still visible in the plan output | Reviewed before the repository became public; the names are not secrets |
 | T27 | Low | The commit history shows the author's personal email (also public in the companion repository) and an unlinked placeholder noreply address on 19 commits | Kept deliberately; turn on GitHub's email privacy settings |
+| T28 | Low | The API accepts an order that `CreateOrder` can never create (a repeated `itemId`); the caller sees `202` and only the alarm reports the failure | Reject it in the API's mapping template, or add an order status |
 | T25 | Low | The deploy role can manage REST APIs in the account, not only this project's, because API IDs are not known in advance | Tag-based access control |
 | T11 | Low | The stage is throttled and the consumer capped, but there is no per-caller quota, reserved concurrency or budget alarm | A usage plan, a reserved concurrency limit, an AWS Budget alert |
 | T14 | Low | A message that fails three times leaves the order saved but unannounced, in the intake dead-letter queue, until redriven | Redrive tooling (untried) |
@@ -325,12 +326,13 @@ More questions and answers are in the [FAQ](docs/FAQ.md).
 | **No end-user authentication** | The API accepts AWS-signed requests only, so it suits other services, not browsers or customers | Add a Cognito or JWT authorizer |
 | **Fulfilment only records `FULFILLED`** | There is no inventory or shipping logic | Real processing in `FulfilOrder` |
 | **A failed order is only visible as an alarm** | The caller gets `202` before the order is saved, so a message that fails three times ends in the intake dead-letter queue and the alarm; the order may be saved but unannounced until it is redriven | Redrive tooling, and an order status the caller can read |
+| **The API accepts orders that can never succeed** | An order that repeats an `itemId` passes the API's schema and gets `202`, but `CreateOrder` rejects it three times and it ends in the intake dead-letter queue (verified live). Nothing is saved or published, and only the alarm reports it | Reject repeated item IDs in the API's mapping template, or add an order status the caller can read |
 | **No idempotency key on create** | A client retry creates a second order | Accept and store a client-supplied key |
 | **SNS topics and table keys** | Topics are unencrypted (EventBridge and CloudWatch need a customer-managed key); tables use the AWS-managed key | A customer-managed KMS key |
 | **No event replay** | An event with no matching rule, or a consumer added later, cannot see past events | An EventBridge archive |
 | **No `pip-audit` yet** | Nothing to audit until the Lambdas have a pinned requirements file | Add it with the first third-party dependency |
 
-**Built but not applied:** the `prod` environment. **Tried and working in `dev`:** the signed order API, retries and both dead-letter alarms, and the forged-event controls. **Not tried:** redriving from a dead-letter queue and a throttle burst.
+**Built but not applied:** the `prod` environment. **Tried and working in `dev`:** the signed order API, three attempts then the dead-letter queue and the alarm on both the intake and the fulfilment queue, and the forged-event controls. **Not tried:** redriving from a dead-letter queue and a throttle burst.
 
 ## Related
 
