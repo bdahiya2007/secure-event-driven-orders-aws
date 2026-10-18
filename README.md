@@ -369,7 +369,7 @@ safeguards are described in the [Terraform reference](terraform/README.md#cicd-g
 - **Idempotent by lease, not by luck.** Reading "has this order been processed?" and then acting would let two copies race, so the check and the claim are one conditional write. The holder gets a lease; a crashed holder's lease runs out and the next retry takes over. The result is recorded only by the lease holder, and a record that is `COMPLETED` is never overwritten. Publishing an event cannot be made exactly once (the event can go out and the result still fail to be written), so that one window can repeat an event; the consumers tolerate it.
 - **A global endpoint, with replication off.** Replication would copy every event to the secondary bus, where the secondary rules would process it again (duplicate fulfilment work and emails). With it off, events go to one bus at a time. The price: events in flight in the primary when it fails are not available in the secondary.
 - **Global tables for the data.** `FulfilOrder` checks each event against the order table and `CreateOrder` keeps its idempotency records in a table, so both Regions must see the same data. Replication is eventual and last-writer-wins, so conditional writes are atomic within a Region only; a check that runs before an order has replicated simply fails and is retried.
-- **Off by default, applied by hand.** Like your other multi-region work: the pipeline applies one Region with the switch off, and the secondary is applied from a workstation. This keeps the pipeline's permissions unchanged.
+- **Off by default, applied by hand.** The pipeline applies one Region with the switch off, and the secondary is applied from a workstation. This keeps the pipeline's permissions unchanged.
 - **The request ID is the order ID.** API Gateway's request ID (a UUID) is the `orderId`, so the caller has it immediately and every retry of one message refers to the same order. A client that retries the whole request still creates a second order (no idempotency key yet).
 - **AWS IAM signing for the API.** It needs no extra service and keeps the endpoint closed to anyone without credentials. It suits service-to-service callers; an end-user flow would add Cognito or another authorizer.
 - **EventBridge, then SQS.** The bus lets consumers be added without touching `CreateOrder` (the notification rule was added that way). The queue absorbs bursts, retries failures and keeps unprocessable messages in a dead-letter queue.
@@ -395,7 +395,27 @@ More questions and answers are in the [FAQ](docs/FAQ.md).
 | **No event replay** | An event with no matching rule, or a consumer added later, cannot see past events | An EventBridge archive |
 | **No `pip-audit` yet** | Nothing to audit until the Lambdas have a pinned requirements file | Add it with the first third-party dependency |
 
-**Built but not applied:** the `prod` environment. **Tried and working in `dev`:** the signed order API, three attempts then the dead-letter queue and the alarm on both the intake and the fulfilment queue, and the forged-event controls. **Not tried:** redriving from a dead-letter queue and a throttle burst.
+**Tried and working in `dev`:** the signed order API, three attempts then the dead-letter queue and the alarm on both the intake and the fulfilment queue, the forged-event controls, and a multi-region failover and fail-back ([DISASTER_RECOVERY.md](docs/DISASTER_RECOVERY.md)). **Not tried:** redriving from a dead-letter queue, a throttle burst, a forced publish failure, and a real Region outage.
+
+### Built, but switched off
+
+| Feature | State |
+|---|---|
+| **Multi-region** (`enable_multi_region`) | Off by default in both environments. When on it adds a second Region's API, queues, functions and rules, global tables and an EventBridge global endpoint with a Route 53 health check. Applied from a workstation, rehearsed live in `dev` (failover and fail-back), and costs the replicated writes plus about $0.50 a month for the health check. While the secondary stack exists the pipeline cannot run, so switch it off first. See [DISASTER_RECOVERY.md](docs/DISASTER_RECOVERY.md). |
+| **`awscrt` packaging** | Only built when the multi-region switch is on, because signing for a global endpoint needs it and the Lambda runtime lacks it. With the switch off, the `CreateOrder` package is the handler alone. |
+| **The `prod` environment** | Written and validated by the pipeline's offline checks, but never applied. Nothing in this README has been demonstrated there. |
+
+### Out of scope on purpose
+
+| Not done | Why |
+|---|---|
+| A browser front end | The API accepts AWS-signed requests only, so it suits other services. A browser client would need end-user authentication first (listed above). |
+| Update, delete, list and order-status endpoints | The project demonstrates one create path and the events behind it. A list needs a design (a `Scan` is unbounded), and a status endpoint needs the caller to own the order. |
+| A custom domain, and DNS routing between Regions | Needs a domain the project does not own. Callers pick an API URL themselves, as the gaps above say. |
+| A VPC, NAT gateway or private endpoints | Every service used is reached over its public AWS endpoint with IAM, and there are no private resources to protect. A NAT gateway would be the largest idle cost in the project. |
+| WAF, response caching and provisioned concurrency | Each bills while idle or makes results stale, and none has been measured here. The API has stage-level throttling limits instead. |
+| More than two environments, or more than two Regions | `dev` and `prod` with an optional second Region show the pattern. More copies would add cost, not understanding. |
+| Real fulfilment logic | `FulfilOrder` records `FULFILLED` to show the event flow. Inventory and shipping are a business domain, not part of the architecture being shown. |
 
 ## Related
 
