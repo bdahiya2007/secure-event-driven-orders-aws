@@ -1,8 +1,8 @@
 # The secondary Region of a multi-region deployment (enable_multi_region). Everything here exists only while the
 # switch is on. It mirrors the primary Region: its own API Gateway, queues, Lambda functions, event bus and SNS topics.
 # The three tables are global tables, so the secondary Region reads and writes replicas of the same data.
-# IAM roles are global, so the secondary functions and roles carry a -usw2- style suffix to avoid clashing with the
-# primary ones. Every module here runs against the aws.secondary provider.
+# IAM roles are global, so the secondary functions and roles carry the Region (without dashes) in their names to avoid
+# clashing with the primary ones. Every module here runs against the aws.secondary provider.
 
 locals {
   secondary_table_arns = {
