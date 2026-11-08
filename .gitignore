@@ -4,6 +4,8 @@
 *.tfstate.*
 crash.log
 crash.*.log
+.terraformrc
+terraform.rc
 override.tf
 override.tf.json
 *_override.tf
@@ -30,7 +32,12 @@ out.json
 *.p12
 *.pfx
 credentials
+*credentials*
 .aws/
+.ssh/
+id_rsa*
+id_ed25519*
+*.ppk
 
 # Python
 __pycache__/
@@ -48,8 +55,8 @@ node_modules/
 .DS_Store
 Thumbs.db
 
-# Claude Code local settings
-.claude/settings.local.json
+# Claude Code local settings and memory (the whole folder stays local)
+.claude/
 
 # Backend config holds the state bucket name (copy from backend.hcl.example)
 backend.hcl
@@ -62,3 +69,23 @@ terraform/iam/combined-permission-set-policy.json
 
 # Local runbook for making a repository public; keep it out of the repository
 RUNBOOK_PUBLIC_RELEASE.md
+
+# Logs, scratch files and backups can hold order data, addresses or ARNs
+*.log
+logs/
+*.bak
+*.tmp
+*.orig
+scratch/
+tmp/
+
+# Tool credential files and data dumps that are easy to commit by accident
+.npmrc
+.netrc
+.docker/
+.envrc
+.gnupg/
+secrets.*
+*.secret
+*.dump
+backup*.sql
