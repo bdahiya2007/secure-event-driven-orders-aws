@@ -1,6 +1,6 @@
 # FAQ
 
-Questions about the design, the behaviour and the operation of this project, grouped by topic, with short answers and where to read more. Everything described here was built and checked in `dev` (one account, one region, one user) unless an answer says otherwise; "not tested" means exactly that.
+Questions about the design, the behaviour and the operation of this project, grouped by topic, with short answers and where to read more. Everything described here was built and checked in `dev` (one account, one user; the multi-region option was exercised in two Regions) unless an answer says otherwise; "not tested" means exactly that.
 
 **Topics:** [Design and flow](#design-and-flow) | [The order API](#the-order-api) | [Idempotency](#idempotency) | [Multi-region](#multi-region) | [EventBridge](#eventbridge) | [SQS and fulfilment](#sqs-and-fulfilment) | [SNS and notifications](#sns-and-notifications) | [DynamoDB](#dynamodb) | [Lambda and Python](#lambda-and-python) | [Security and permissions](#security-and-permissions) | [Cost](#cost) | [Terraform and state](#terraform-and-state) | [CI/CD](#cicd) | [Operating and testing](#operating-and-testing)
 
@@ -220,7 +220,7 @@ No. Destroying a table deletes its data, and point-in-time recovery backups are 
 3.14 is a current Lambda runtime. AWS provider 5.x rejects the `python3.14` runtime name, so the project requires provider `~> 6.0`.
 
 ### Why are there no packaged libraries?
-The functions use only the standard library and `boto3`, which the Lambda runtime provides and AWS keeps patched. There is nothing to package or pin. If packages are added later, pin them and run `pip-audit`.
+The functions use only the standard library and `boto3`, which the Lambda runtime provides and AWS keeps patched, so there is nothing to package or pin. **One exception:** with `enable_multi_region`, `CreateOrder` also carries the vendored `awscrt` library ([why](#why-does-the-multi-region-build-package-a-third-party-library)), which is pinned by version and checked by SHA-256 (T32). If other packages are added later, pin them and run `pip-audit`.
 
 ### What does the input allow-list do?
 `CreateOrder` accepts only `customerId`, `itemId` and `quantity`, with type and length checks (IDs up to 64 characters, quantity 1 to 1000, up to 100 lines, body up to 256 KB). Unknown fields are dropped, so a caller cannot store arbitrary data or override the server-set `orderId` and `createdAt`. There is deliberately no price field: prices should come from a catalog, not the client.
@@ -248,14 +248,20 @@ Nothing uses `*` as a resource or a wildcard action.
 Only the matching EventBridge rule, enforced with an `aws:SourceArn` condition. Both queues and both topics also deny requests that do not use TLS.
 
 ### What is not secured yet?
-No customer-managed keys, no API in front of `CreateOrder` (so no authentication), state kept in a shared bucket, and no static scanning in CI. See the known gaps in the [README](../README.md#security-design).
+The API accepts only IAM-signed requests, so there is no end-user authentication (T1); there are no customer-managed keys (tables use the AWS-managed key, queues SQS-managed encryption, and the topics are unencrypted: T8 and T9); no API access logs or caller identity (T7); the state is in a bucket shared with another project (T21); and the deploy role can edit any REST API in the account (T25). Static scanning **is** in CI: `bandit` and `checkov` run on every pull request. See the [threat model](THREAT_MODEL.md) and the known gaps in the [README](../README.md#security-design).
+
+### How are secrets kept out of the repository?
+A pre-commit hook and a required CI check run the same scanner over every tracked file and every added line, and GitHub's secret scanning with push protection is on. What it blocks, how to enable the hook and its limits are in [SECRET_SCANNING.md](SECRET_SCANNING.md).
+
+### Where is the threat model?
+In [THREAT_MODEL.md](THREAT_MODEL.md): a STRIDE model with each threat, its control, the residual risk and what is still open. Each ID matches a row in the README's gap table.
 
 ---
 
 ## Cost
 
 ### What does it cost?
-Almost nothing at this scale: roughly $0 when idle and under $1 a month for demo traffic, because everything is pay-per-use. About 100,000 orders a month is roughly $1 to $3, mostly DynamoDB writes, EventBridge events and email delivery. Prices are us-east-1 list prices from memory, **not checked against the pricing pages**.
+Almost nothing at this scale: roughly $0 when idle and under $1 a month for demo traffic, because everything is pay-per-use. About 100,000 orders a month is roughly $1 to $3, mostly DynamoDB writes, EventBridge events and email delivery. Prices are us-east-1 list prices from memory, **not checked against the pricing pages**. These figures cover the single-Region stack. With `enable_multi_region` on, expect extra items they do not include and that have not been priced here: a Route 53 health check, a second set of alarms and queues in the other Region, and replication of every table write.
 
 ### What is the biggest cost per order?
 Email delivery: after the first 1,000 a month it is about $2 per 100,000. At large volumes use a batched or non-email subscriber.
@@ -305,7 +311,7 @@ Both Lambdas have standard-library tests (`python3 -m unittest discover -s tests
 The first run reported 19 findings across nine rules. Each skip in `.checkov.yaml` has a reason: for example unencrypted SNS topics (EventBridge and CloudWatch need a customer-managed key, which is on the to-do list), no VPC (a NAT gateway would cost money for no benefit), and no code signing. Any new finding fails the pull request check.
 
 ### Why is there no `pip-audit` step?
-The Lambdas use only the standard library and the `boto3` that the runtime provides, so there is no pinned dependency list to audit. Add it when a `requirements.txt` exists.
+The Lambdas use only the standard library and the `boto3` that the runtime provides, so there is no pinned dependency list to audit. The one vendored library, `awscrt` (only with `enable_multi_region`), is pinned and hash-checked by `scripts/vendor_awscrt.py` instead, and Dependabot does not watch it, so upgrades are deliberate (T32). Add `pip-audit` when a `requirements.txt` exists.
 
 ### Why can I not push to `main`?
 Branch protection requires every change to go through a pull request with five passing checks (unit tests, `bandit`, `checkov`, the secret scan and the Terraform validation), with the branch up to date, and it includes administrators, so it binds you too. A direct push is refused with `GH006`. Work on a branch, push it, open a pull request and merge once the checks pass. If a pull request cannot be merged, check that the required check names match the jobs that actually ran (`gh pr checks <number>`) and that the PR is not still a draft.
